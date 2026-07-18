@@ -19,11 +19,15 @@ reported landslide incidents from the Bipad portal.
     - `incident_<ID>_sar_post.tif` — Sentinel-1 GRD VV/VH, post-event (optional, same orbit pass)
 2. **`candidate_detection.ipynb`** — narrows each incident zone to a small candidate
    mask by fusing optical change indices (ΔNDVI, ΔNDWI, ΔBSI, ΔNBR) masked by slope,
-   then extracts connected-component blobs. Writes
-   `candidates/incident_<ID>_candidates.json` to the Hugging Face repo.
+   then extracts connected-component blobs. For each candidate it clips the source
+   rasters (before/after/S2, slope, aspect, and paired SAR when present) to the
+   buffered bbox and writes them to `clipped_images/incident_<ID>/candidate_<N>/`.
+   Uploads both:
+   - `candidates/incident_<ID>_candidates.json` — ROI metadata (bbox, area, elongation).
+   - `clipped_images/incident_<ID>/` —    per-candidate clipped image chips (before/after/slope/aspect; SAR NOT clipped).
 
 All files are uploaded to the Hugging Face dataset `sasudo2/landslides` preserving the
-`incident_<ID>/` and `candidates/` folder structure.
+`incident_<ID>/`, `candidates/`, and `clipped_images/` folder structure.
 
 See `landslide_workflow.md` for the full scientific rationale (stage-by-stage why/how,
 references, and the SAR + DEM fusion design).
