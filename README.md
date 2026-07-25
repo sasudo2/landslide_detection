@@ -1,49 +1,112 @@
 # Landslide susceptibility detection
 
 This project identifies landslide susceptibility using risk factors collected from
-satellite images (Sentinel-2 optical + Sentinel-1 SAR via Google Earth Engine) for
-reported landslide incidents from the Bipad portal.
+satellite images (Planet.com PlanetScope optical, Sentinel-2 optical + Sentinel-1 SAR
+via Google Earth Engine, and SRTM DEM derivatives) for reported landslide incidents
+from the Bipad portal.
 
-## Workflow (two stages)
+## Workflow (three Kaggle notebooks)
 
-1. **`extracting_data.ipynb`** — for each incident (date + bounding box) download a
-   **single-date, same-day spatial mosaic** of the exact MGRS tiles overlapping the AOI,
-   on the pre-event and post-event side of the incident date. This avoids the
-   "cartoonish" artifact of the old 18-month temporal median composite. Outputs per
-   incident (under `incident_<ID>/`):
-   - `incident_<ID>_before.tif` — 13 bands: B1..B12 + SCL, single best pre-event date
-   - `incident_<ID>_after.tif`  — same, single best post-event date
-   - `incident_<ID>_slope.tif` — SRTM slope (30 m)
-   - `incident_<ID>_aspect.tif` — SRTM aspect (30 m)
-    - `incident_<ID>_sar_pre.tif`  — Sentinel-1 GRD VV/VH, pre-event (optional, same orbit pass)
-    - `incident_<ID>_sar_post.tif` — Sentinel-1 GRD VV/VH, post-event (optional, same orbit pass)
-2. **`candidate_detection.ipynb`** — narrows each incident zone to a small candidate
-   mask by fusing optical change indices (ΔNDVI, ΔNDWI, ΔBSI, ΔNBR) masked by slope,
-   then extracts connected-component blobs. For each candidate it clips the source
-   rasters (before/after/S2, slope, aspect, and paired SAR when present) to the
-   buffered bbox and writes them to `clipped_images/incident_<ID>/candidate_<N>/`.
-   Uploads to **`sasudo2/landslide_data`** (separate repo from imagery):
-   - `candidates.jsonl` — append-only JSONL of all ROI metadata (bbox, area, elongation, clip_dir).
-   - Per-batch zip archives of `clipped_images/incident_<ID>/` — fixed-size 1280 m chips
-     (before/after/slope/aspect/mask; SAR NOT clipped).
+The pipeline is implemented as three sequential Kaggle notebooks. Hugging Face
+(`sasudo2/landslides`, dataset repo) is the single source of truth for both raw imagery
+and candidate outputs — there is no separate second repo. Full behavioral spec,
+naming rules, and the acceptance checklist live in
+[`REFINED_PIPELINE_SPEC.md`](REFINED_PIPELINE_SPEC.md); this section is a short summary.
 
-Imagery (before/after/slope/aspect/SAR GeoTIFFs) is uploaded to **`sasudo2/landslides`**
-preserving the `incident_<ID>/` folder structure at the repo root.
+### 1. `planet_order_creation.ipynb`
+Creates Planet Orders API (v2) orders for **after** imagery (always) and, if
+`ORDER_BEFORE=True` (default `False`), **before** imagery. Incidents are selected via a
+row-index range (`START_IDX`/`END_IDX`) over the input CSV. Scenes are searched with
+Planet's Data API quick-search (`PSScene`, `analytic_sr_udm2` bundle, cloud cover `< 5%`,
+before window up to 180 days pre-incident, after window up to 30 days post-incident) and
+ranked by (closest date, then least cloud). Up to `MAX_SCENES_PER_ORDER` scenes are
+included per order to support multi-scene mosaicking downstream. All order attempts
+(created/skipped/failed) are logged to `raw_images/order_log.csv` on Hugging Face, which
+is also read back on each run to avoid re-ordering the same `(incident_id, order_type)` —
+only genuinely `failed` attempts are retried.
 
-There are two additional notebooks for Planet.com after-images (used instead of GEE for
-post-event optical when Planet coverage is available):
-- **`create_planet_orders.ipynb`** — searches Planet Data API and submits clip orders named
-  `incident_<ID>_after` for a given index range of incidents.
-- **`planet_orders_download.ipynb`** — downloads completed Planet orders (after-images) and
-  GEE before/DEM/SAR data for the same range, uploading to `sasudo2/landslides`.
+### 2. `incident_download.ipynb`
+Downloads the raster inputs needed for change detection, using the Hugging Face file
+inventory and live Planet order state to skip incidents/files already present:
+- **After**: downloads the Planet `..._planet_after` order's result(s) and mosaics
+  multi-scene orders into a single file.
+- **Before**: downloads the Planet `..._planet_before` order if one exists (kept
+  separately, never overwrites GEE-before); Sentinel-2 **GEE-before is always attempted**
+  as a mandatory fallback (closest date first, then least cloud, `SCL`-based cloud
+  filtering) so every incident has at least one before image.
+- **SAR**: Sentinel-1 GRD VV+VH, closest pre-event and closest post-event scene.
+- **Terrain**: SRTM-derived slope and aspect.
 
-See `landslide_workflow.md` for the full scientific rationale (stage-by-stage why/how,
-references, and the SAR + DEM fusion design).
+All files are uploaded to `raw_images/raw_incidents/incident_{ID}/` on Hugging Face, and
+a `raw_images/download_log.csv` records per-incident upload status.
+
+### 3. `candidate_detection.ipynb`
+Runs bi-temporal **IR-MAD** (Iteratively Re-weighted Multivariate Alteration Detection)
+change detection separately on the optical 4-band pair (before/after, common
+Red/Green/Blue/NIR subset) and the SAR VV/VH pair, fuses the two confidence maps, applies
+a slope mask (`>= 20°`), and segments with SLIC superpixels sized to a target ~30 m
+physical footprint. A statistical hysteresis threshold (calibrated IR-MAD confidence,
+high/low significance) turns the fused confidence map into a binary mask; connected
+components are filtered by area/elongation, scored, and ranked. All rasters are
+reprojected onto a common analysis grid (EPSG:4326, ~10 m — matching GEE's native
+sampling) before IR-MAD so before/after/SAR/slope pixels are spatially aligned regardless
+of each source's native CRS/resolution.
+
+Outputs are uploaded under `candidates/` on Hugging Face:
+- `candidates/incident_{ID}/candidate_{N}/incident_{ID}_candidate_{N}_{before,after,slope,mask}.tif`
+  — per-candidate chips (bbox padded by 100 m), one folder per ranked candidate, including
+  a clipped binary change-mask chip alongside before/after/slope. There is no
+  whole-incident mask or JSON metadata file — only these per-candidate outputs.
+- `candidates/candidate_status.csv` — per-incident run status; the presence of any file
+  under `candidates/incident_{ID}/` is also used to skip incidents already processed on
+  re-runs.
+
+## Naming conventions (Hugging Face, repo `sasudo2/landslides`)
+
+```
+raw_images/
+  order_log.csv
+  download_log.csv
+  raw_incidents/incident_{ID}/
+    incident_{ID}_after.tif
+    incident_{ID}_planet_before.tif   (optional, if a Planet before order succeeded)
+    incident_{ID}_gee_before.tif      (mandatory fallback)
+    incident_{ID}_sar_pre.tif
+    incident_{ID}_sar_post.tif
+    incident_{ID}_slope.tif
+    incident_{ID}_gee_aspect.tif
+candidates/
+  candidate_status.csv
+  incident_{ID}/candidate_{N}/
+    incident_{ID}_candidate_{N}_before.tif
+    incident_{ID}_candidate_{N}_after.tif
+    incident_{ID}_candidate_{N}_slope.tif
+    incident_{ID}_candidate_{N}_mask.tif
+```
+
+Planet order names follow `incident_{ID}_planet_after` / `incident_{ID}_planet_before`.
+
+## Other components
+- `landslide_annotator/` — a QGIS plugin for manual annotation of candidate chips
+  (loads `incident_XXXX/candidate_YYYY` folder pairs, side-by-side canvas view with
+  annotation buttons and CSV export). Independent of the 3-notebook pipeline above.
+- `nepal-administrative-boundary-shapefiles/` — reference administrative boundaries.
+- `landslide_workflow.md` — earlier scientific-rationale document (stage-by-stage
+  why/how, references) covering the original GEE-only, index-fusion design. Some
+  specifics there (e.g. change indices, SAR coherence, susceptibility priors) predate
+  the current Planet + IR-MAD pipeline described above and in
+  `REFINED_PIPELINE_SPEC.md`; treat `REFINED_PIPELINE_SPEC.md` as authoritative for the
+  implemented pipeline.
 
 ## Work done
-- Collection of all reported landslide cases from Bipad portal.
-- Pre/post single-date mosaics + DEM derivatives downloaded for the incident set.
+- Collection of all reported landslide cases from the Bipad portal.
+- Full 3-notebook pipeline implemented: Planet order creation, incident download
+  (Planet + GEE + SAR + DEM), and IR-MAD-based candidate detection with per-candidate
+  chip export.
 
-## Work under progress
-- Before/after candidate narrowing using multi-index change fusion (Stage 1 of the workflow).
-- Adding the Sentinel-1 SAR change cue and BBUnet / APSAM refinement (Stage 2).
+## Work under progress / not yet run on Kaggle
+- End-to-end execution and validation of the 3-notebook pipeline against the full
+  incident set (implementation is complete and statically validated, but not yet
+  executed against live Planet/GEE/Hugging Face services in this session).
+- SAM2 / segmentation refinement stage downstream of candidate detection (out of
+  scope for the current 3 notebooks, per `REFINED_PIPELINE_SPEC.md`).
