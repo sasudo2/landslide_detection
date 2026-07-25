@@ -22,12 +22,20 @@ reported landslide incidents from the Bipad portal.
    then extracts connected-component blobs. For each candidate it clips the source
    rasters (before/after/S2, slope, aspect, and paired SAR when present) to the
    buffered bbox and writes them to `clipped_images/incident_<ID>/candidate_<N>/`.
-   Uploads both:
-   - `candidates/incident_<ID>_candidates.json` — ROI metadata (bbox, area, elongation).
-   - `clipped_images/incident_<ID>/` —    per-candidate clipped image chips (before/after/slope/aspect; SAR NOT clipped).
+   Uploads to **`sasudo2/landslide_data`** (separate repo from imagery):
+   - `candidates.jsonl` — append-only JSONL of all ROI metadata (bbox, area, elongation, clip_dir).
+   - Per-batch zip archives of `clipped_images/incident_<ID>/` — fixed-size 1280 m chips
+     (before/after/slope/aspect/mask; SAR NOT clipped).
 
-All files are uploaded to the Hugging Face dataset `sasudo2/landslides` preserving the
-`incident_<ID>/`, `candidates/`, and `clipped_images/` folder structure.
+Imagery (before/after/slope/aspect/SAR GeoTIFFs) is uploaded to **`sasudo2/landslides`**
+preserving the `incident_<ID>/` folder structure at the repo root.
+
+There are two additional notebooks for Planet.com after-images (used instead of GEE for
+post-event optical when Planet coverage is available):
+- **`create_planet_orders.ipynb`** — searches Planet Data API and submits clip orders named
+  `incident_<ID>_after` for a given index range of incidents.
+- **`planet_orders_download.ipynb`** — downloads completed Planet orders (after-images) and
+  GEE before/DEM/SAR data for the same range, uploading to `sasudo2/landslides`.
 
 See `landslide_workflow.md` for the full scientific rationale (stage-by-stage why/how,
 references, and the SAR + DEM fusion design).
