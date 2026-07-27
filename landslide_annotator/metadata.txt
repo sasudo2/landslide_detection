@@ -1,0 +1,17 @@
+[general]
+name=Landslide Annotator
+description=Side-by-side before/after GeoTIFF viewer for landslide candidate annotation. Navigate incident/candidate folders, mark as landslide/not, export CSV.
+version=1.1.0
+qgisMinimumVersion=3.0
+qgisMaximumVersion=3.99
+author=Landslide Team
+email=
+about=Loads before/after GeoTIFF pairs from incident_XXXX/candidate_XXXX folder structure. Side-by-side canvas view with annotation buttons and CSV export.
+tracker=
+repository=
+tags=landslide, annotation, geotiff, remote sensing
+homepage=
+category=Raster
+icon=
+experimental=False
+deprecated=False
