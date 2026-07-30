@@ -221,22 +221,44 @@ class AnnotationDialog(QDialog):
         if path:
             self.csv_edit.setText(path)
 
-    def _get_raster_centroid(self, raster_path):
+    def _get_raster_bounds(self, raster_path):
         temp_layer = QgsRasterLayer(raster_path, "temp", "gdal")
         if not temp_layer.isValid():
-            return None, None
+            return None, None, None, None
+
         extent = temp_layer.extent()
-        cx = (extent.xMinimum() + extent.xMaximum()) / 2.0
-        cy = (extent.yMinimum() + extent.yMaximum()) / 2.0
+
+        min_x = extent.xMinimum()
+        max_x = extent.xMaximum()
+        min_y = extent.yMinimum()
+        max_y = extent.yMaximum()
+
         layer_crs = temp_layer.crs()
         wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+
         if layer_crs != wgs84 and layer_crs.isValid() and wgs84.isValid():
             transform = QgsCoordinateTransform(
-                layer_crs, wgs84, QgsProject.instance().transformContext()
+                layer_crs,
+                wgs84,
+                QgsProject.instance().transformContext()
             )
-            pt = transform.transform(QgsPointXY(cx, cy))
-            return round(pt.x(), 6), round(pt.y(), 6)
-        return round(cx, 6), round(cy, 6)
+
+            bottom_left = transform.transform(QgsPointXY(min_x, min_y))
+            top_right = transform.transform(QgsPointXY(max_x, max_y))
+
+            return (
+                round(bottom_left.y(), 6),   # min_lat
+                round(top_right.y(), 6),     # max_lat
+                round(bottom_left.x(), 6),   # min_lon
+                round(top_right.x(), 6)      # max_lon
+            )
+
+        return (
+            round(min_y, 6),
+            round(max_y, 6),
+            round(min_x, 6),
+            round(max_x, 6)
+        )
 
     def _find_raster_by_keyword(self, tif_files, keyword):
         """Return the first raster whose filename contains the given token
@@ -273,7 +295,7 @@ class AnnotationDialog(QDialog):
         self.items = []
         self.centroids = {}
         for incident_dir in incident_dirs:
-            incident_id = os.path.basename(incident_dir)
+            incident_id = os.path.basename(incident_dir).replace("incident_", "")
             candidate_dirs = sorted(glob.glob(os.path.join(incident_dir, "candidate_*")))
             for candidate_dir in candidate_dirs:
                 candidate_id = os.path.basename(candidate_dir)
@@ -290,8 +312,8 @@ class AnnotationDialog(QDialog):
                 if before and after:
                     self.items.append(
                         (incident_id, candidate_id, before, after, slope, mask))
-                    centroid_x, centroid_y = self._get_raster_centroid(after)
-                    self.centroids[(incident_id, candidate_id)] = (centroid_x, centroid_y)
+                    bounds = self._get_raster_bounds(after)
+                    self.centroids[(incident_id, candidate_id)] = bounds
 
         if not self.items:
             QMessageBox.warning(self, "Error",
@@ -555,11 +577,33 @@ class AnnotationDialog(QDialog):
             os.makedirs(os.path.dirname(self.csv_path) or '.', exist_ok=True)
             with open(self.csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['incident', 'candidate', 'centroid_x', 'centroid_y', 'label', 'timestamp'])
+                writer.writerow([
+                                'incident',
+                                'candidate',
+                                'min_lat',
+                                'max_lat',
+                                'min_lon',
+                                'max_lon',
+                                'label',
+                                'timestamp'
+                            ])
                 for (inc_id, cand_id), lbl in sorted(self.annotations.items()):
                     ts = self.annotations_ts.get((inc_id, cand_id), '')
-                    cx, cy = self.centroids.get((inc_id, cand_id), (None, None))
-                    writer.writerow([inc_id, cand_id, cx if cx is not None else '', cy if cy is not None else '', lbl, ts])
+                    min_lat, max_lat, min_lon, max_lon = self.centroids.get(
+                        (inc_id, cand_id),
+                        (None, None, None, None)
+                    )
+
+                    writer.writerow([
+                        inc_id,
+                        cand_id,
+                        min_lat if min_lat is not None else '',
+                        max_lat if max_lat is not None else '',
+                        min_lon if min_lon is not None else '',
+                        max_lon if max_lon is not None else '',
+                        lbl,
+                        ts
+                    ])
         except Exception as e:
             QMessageBox.critical(self, "CSV Error", f"Failed to write CSV:\n{e}")
 
