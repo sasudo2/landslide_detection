@@ -13,23 +13,36 @@ This document captures the finalized requirements for a Kaggle + Hugging Face wo
 2. CSV columns:
    `id,title,incident_on,min_lon,min_lat,max_lon,max_lat`
 3. Incident filtering must use row index range (`start_idx`, `end_idx`).
-4. Cloud threshold for before and after imagery: `< 5%`.
-5. Before window: up to 6 months before incident date.
-6. Post window: up to 1 month after incident date for ancillary GEE/SAR data
-   (`incident_download.ipynb`). Planet's own after-image search
-   (`planet_order_creation.ipynb`) widens this to 2 months (`POST_DAYS=60`) since a
-   1-month window too often has no <5%-cloud PlanetScope scene, especially during/after
-   monsoon cloud cover.
-7. Date prioritization: closest date first, then least cloud.
-8. Hugging Face dataset: `sasudo2/landslides`.
-9. Storage layout:
-   - `raw_images/raw_incidents/incident_{ID}/` for raw incident rasters
-   - `raw_images/order_log.csv` for order tracking and dedup
-   - `candidates/` for candidate outputs
+4. **Default Planet acquisition mode is monthly Mosaic composites**
+   (`USE_MOSAIC_COMPOSITES=True` in both Notebook 1 and Notebook 2 - keep in sync).
+   Planet after/before imagery is fetched directly from the Mosaics/quads API in
+   `incident_download.ipynb`; `planet_order_creation.ipynb` performs no ordering in this
+   mode. Rules 5-8 below describe the legacy per-scene ordering mode, used only when
+   `USE_MOSAIC_COMPOSITES=False`.
+5. Cloud threshold for before and after imagery in legacy per-scene mode: `< 5%`.
+6. Legacy per-scene before window: up to 6 months before incident date.
+7. Legacy per-scene post window: up to 1 month after incident date for ancillary GEE/SAR
+   data (`incident_download.ipynb`, applies regardless of acquisition mode). Planet's own
+   after-image search (`planet_order_creation.ipynb`, legacy mode only) widens this to 2
+   months (`POST_DAYS=60`) since a 1-month window too often has no <5%-cloud PlanetScope
+   scene, especially during/after monsoon cloud cover.
+8. Date prioritization (legacy per-scene mode, and GEE/SAR selection in both modes):
+   closest date first, then least cloud.
+9. Hugging Face dataset: `sasudo2/landslides`.
+10. Storage layout:
+    - `raw_images/raw_incidents/incident_{ID}/` for raw incident rasters
+    - `raw_images/order_log.csv` for order tracking and dedup (legacy mode only)
+    - `candidates/` for candidate outputs
 
 ## Notebook 1: `planet_order_creation.ipynb`
 
 ### Required behavior
+
+**Default (`USE_MOSAIC_COMPOSITES=True`)**: this entire notebook is a no-op - it prints a
+message and exits, since Mosaic composites are fetched directly in
+`incident_download.ipynb` with no order to submit or poll.
+
+**Legacy per-scene mode (`USE_MOSAIC_COMPOSITES=False` only)** - items 1-7 below apply:
 
 1. Create Planet orders for after imagery.
 2. Create Planet before orders only if user enables it.
@@ -65,9 +78,29 @@ Use all practical fields for traceability:
 
 ### Required behavior
 
-1. Read Hugging Face files and Planet order state; only process missing artifacts.
-2. Download Planet after imagery from preordered incidents.
-3. If multiple assets/scenes exist for an incident, mosaic to one:
+1. Read Hugging Face files (and, when `USE_MOSAIC_COMPOSITES=False`, live Planet order
+   state) to only process missing artifacts.
+2. Acquire Planet after/before imagery via one of two modes, selected by the
+   `USE_MOSAIC_COMPOSITES` toggle (must match the same flag in
+   `planet_order_creation.ipynb`):
+   - **`True` (default - monthly Mosaic composites)**: fetch directly from Planet's
+     Mosaics/quads API, no Orders API involved at all. `find_after_mosaic()` searches the
+     incident's month then forward (the slide must already have happened);
+     `find_before_mosaic()` searches backward starting one month before the incident. All
+     quads covering the incident AOI are downloaded, mosaicked if there is more than one,
+     and window-clipped to the exact AOI bbox. No per-scene UDM2 masking is needed here
+     since Planet's own compositing already removes cloud/shadow and normalizes color
+     across constituent scenes.
+   - **`False` (legacy per-scene ordering)**: download Planet after/before imagery from
+     preordered incidents created by `planet_order_creation.ipynb`
+     (per `order_log.csv`/live order state). Each scene's analytic SR asset must be
+     paired (by filename prefix) with its delivered UDM2 usable-data-mask asset from the
+     same `analytic_sr_udm2` bundle, and any pixel flagged cloud/shadow/haze/snow (UDM2
+     band 1 ≠ clear) must be zeroed out **before** mosaicking - Planet's scene-level
+     `cloud_cover` filter is computed over the whole scene footprint, not the tiny
+     clipped incident AOI, so a nominally "clean" scene can still have cloud sitting
+     directly over the incident.
+3. If multiple assets/scenes/quads exist for an incident, mosaic to one:
    - `incident_{ID}_after.tif`
 4. Before imagery rules:
    - Download Planet before if available as `incident_{ID}_planet_before.tif`
@@ -125,10 +158,10 @@ Per incident folder:
 ## Acceptance Checklist
 
 1. Row index filtering works in Notebooks 1 and 2.
-2. Cloud threshold `< 5%` is enforced for before and after selection.
-3. Before ordering default is OFF in Notebook 1.
-4. Duplicate orders are prevented via `raw_images/order_log.csv`.
-5. Multi-scene orders are mosaicked in Notebook 2.
+2. Cloud threshold `< 5%` is enforced for before and after selection (per-scene mode).
+3. Before ordering default is OFF in Notebook 1 (per-scene mode).
+4. Duplicate orders are prevented via `raw_images/order_log.csv` (per-scene mode).
+5. Multi-scene orders/quads are mosaicked in Notebook 2.
 6. Planet-before and GEE-before are both preserved when available.
 7. GEE-before always exists if Planet-before is missing.
 8. SAR pre/post VV+VH, slope, and aspect are generated for processed incidents.
@@ -136,3 +169,22 @@ Per incident folder:
 10. SCL is used only for masking, never as IR-MAD feature input.
 11. Candidate outputs are written under `candidates/`.
 12. Re-running pipeline is idempotent (skip behavior via HF logs/files).
+13. `USE_MOSAIC_COMPOSITES` is set identically in both Notebook 1 and Notebook 2.
+14. When `USE_MOSAIC_COMPOSITES=False`, every Planet SR asset is masked against its
+    paired UDM2 asset before mosaicking (no unmasked cloud/shadow/haze/snow pixels).
+15. When `USE_MOSAIC_COMPOSITES=True`, `MOSAIC_NAME_TEMPLATE` has been verified against
+    the account's actual Planet plan mosaic series names (see self-check in cell 3).
+
+## Addendum (2026-08-04): Monthly Mosaic composites
+
+Goal shifted from before/after change-detection comparison toward reliably collecting a
+clear image per known incident, while still keeping both before/after images and IR-MAD
+change detection. Real downloaded per-scene chips showed cross-scene color mismatch,
+unmasked cloud/haze blobs, and jagged mosaic seams (see `landslide_pipeline.md` repo
+memory for the full pixel-level diagnosis). Planet's monthly Mosaic composites solve this
+at the source (Planet does its own seam-blending, radiometric normalization, and cloud
+exclusion when building each mosaic), so both before/after acquisition now default to the
+Mosaics/quads API via `USE_MOSAIC_COMPOSITES=True`, with the original per-scene
+Orders-API path (including the UDM2 masking fix) fully preserved as a fallback via the
+same toggle in both Notebook 1 and Notebook 2. `candidate_detection.ipynb` (Notebook 3)
+requires no changes, since both acquisition modes write to the same output filenames.
