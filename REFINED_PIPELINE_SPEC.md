@@ -15,7 +15,11 @@ This document captures the finalized requirements for a Kaggle + Hugging Face wo
 3. Incident filtering must use row index range (`start_idx`, `end_idx`).
 4. Cloud threshold for before and after imagery: `< 5%`.
 5. Before window: up to 6 months before incident date.
-6. Post window: up to 1 month after incident date.
+6. Post window: up to 1 month after incident date for ancillary GEE/SAR data
+   (`incident_download.ipynb`). Planet's own after-image search
+   (`planet_order_creation.ipynb`) widens this to 2 months (`POST_DAYS=60`) since a
+   1-month window too often has no <5%-cloud PlanetScope scene, especially during/after
+   monsoon cloud cover.
 7. Date prioritization: closest date first, then least cloud.
 8. Hugging Face dataset: `sasudo2/landslides`.
 9. Storage layout:

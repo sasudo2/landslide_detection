@@ -18,8 +18,10 @@ Creates Planet Orders API (v2) orders for **after** imagery (always) and, if
 `ORDER_BEFORE=True` (default `False`), **before** imagery. Incidents are selected via a
 row-index range (`START_IDX`/`END_IDX`) over the input CSV. Scenes are searched with
 Planet's Data API quick-search (`PSScene`, `analytic_sr_udm2` bundle, cloud cover `< 5%`,
-before window up to 180 days pre-incident, after window up to 30 days post-incident) and
-ranked by (closest date, then least cloud). Up to `MAX_SCENES_PER_ORDER` scenes are
+before window up to 180 days pre-incident, after window up to 60 days post-incident -
+widened from the original 30-day spec since a 1-month window too often had no <5%-cloud
+scene during/after monsoon season) and ranked by (closest date, then least cloud). Up to
+`MAX_SCENES_PER_ORDER` scenes are
 included per order to support multi-scene mosaicking downstream. All order attempts
 (created/skipped/failed) are logged to `raw_images/order_log.csv` on Hugging Face, which
 is also read back on each run to avoid re-ordering the same `(incident_id, order_type)` —
