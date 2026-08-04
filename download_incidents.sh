@@ -45,8 +45,17 @@ import os
 import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from huggingface_hub import HfApi, hf_hub_download
+
+try:
+    import hf_transfer  # noqa: F401
+    os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '1')  # multi-connection transfer, if installed
+except ImportError:
+    pass
+
+DOWNLOAD_WORKERS = 8
 
 repo_id, outdir, token = sys.argv[1], sys.argv[2], (sys.argv[3] or None)
 range_args = sys.argv[4:]
@@ -88,16 +97,33 @@ else:
 
 print(f'Found {num_available} incident(s) with candidates on HF; downloading {len(target_ids)}.')
 
+def fetch_one(f):
+    local_path = hf_hub_download(repo_id=repo_id, repo_type='dataset', filename=f, token=token)
+    rel = f[len('candidates/'):]  # incident_{ID}/candidate_{N}/incident_{ID}_candidate_{N}_*.tif
+    dest = os.path.join(outdir, rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copy(local_path, dest)
+
+target_files = []
 for inc_id in target_ids:
     prefix = f'candidates/incident_{inc_id}/'
     files = [f for f in all_files if f.startswith(prefix)]
     print(f'  incident_{inc_id}: {len(files)} file(s)')
-    for f in files:
-        local_path = hf_hub_download(repo_id=repo_id, repo_type='dataset', filename=f, token=token)
-        rel = f[len('candidates/'):]  # incident_{ID}/candidate_{N}/incident_{ID}_candidate_{N}_*.tif
-        dest = os.path.join(outdir, rel)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copy(local_path, dest)
+    target_files.extend(files)
+
+print(f'Downloading {len(target_files)} file(s) with {DOWNLOAD_WORKERS} worker(s)...')
+done = 0
+with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as ex:
+    futures = {ex.submit(fetch_one, f): f for f in target_files}
+    for fut in as_completed(futures):
+        f = futures[fut]
+        try:
+            fut.result()
+        except Exception as e:
+            print(f'  Failed {f}: {e}')
+        done += 1
+        if done % 50 == 0 or done == len(target_files):
+            print(f'  {done}/{len(target_files)} downloaded')
 
 for csv_name in ('candidate_status.csv', 'candidate_metadata.csv'):
     remote = f'candidates/{csv_name}'
