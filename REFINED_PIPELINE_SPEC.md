@@ -88,9 +88,12 @@ Use all practical fields for traceability:
      incident's month then forward (the slide must already have happened);
      `find_before_mosaic()` searches backward starting one month before the incident. All
      quads covering the incident AOI are downloaded, mosaicked if there is more than one,
-     and window-clipped to the exact AOI bbox. No per-scene UDM2 masking is needed here
-     since Planet's own compositing already removes cloud/shadow and normalizes color
-     across constituent scenes.
+     and window-clipped to the exact AOI bbox. Mosaic quads are delivered in their own
+     native CRS (typically Web Mercator, EPSG:3857, not WGS84) - the AOI bbox must be
+     reprojected to the quad's CRS (`rasterio.warp.transform_bounds`) before computing the
+     clip window, otherwise the window silently rounds to 0 pixels and crashes on write.
+     No per-scene UDM2 masking is needed here since Planet's own compositing already
+     removes cloud/shadow and normalizes color across constituent scenes.
    - **`False` (legacy per-scene ordering)**: download Planet after/before imagery from
      preordered incidents created by `planet_order_creation.ipynb`
      (per `order_log.csv`/live order state). Each scene's analytic SR asset must be
@@ -133,15 +136,31 @@ Use all practical fields for traceability:
 4. SAR IR-MAD:
    - Use VV and VH for both pre and post (4 SAR inputs total)
 5. Implement robust IR-MAD using a maintained library approach, with stable fallback path if dependency is unavailable.
-6. Produce optical and SAR chi-square/confidence maps separately, then fuse.
-7. Apply slope masking.
-8. Run SLIC using feature stack:
+6. Produce optical and SAR chi-square/confidence maps separately.
+7. NDVI-loss fusion: compute NDVI (before) minus NDVI (after), clip to >= 0 (vegetation
+   loss only), percentile-normalize to `[0,1]`, and fuse it in as a third independent
+   evidence channel alongside the optical/SAR IR-MAD confidences via an N-way geometric
+   mean (only whichever of the three channels are available for that incident). This
+   targets the actual landslide spectral signature (vegetation stripped, bare soil/debris
+   exposed) instead of IR-MAD's raw spectral distance, which fires equally for any
+   optical change (crop harvest, phenology, cloud residue).
+8. Apply slope masking.
+9. Run SLIC using feature stack:
    - fused confidence
    - normalized after-image texture channels
    - normalized slope
-9. Use dual-threshold hysteresis on confidence probabilities.
-10. Extract connected blobs, filter by area/elongation, rank severity from IR-MAD confidence/chi-square, keep top-N.
-11. Save candidate chips/masks/metadata under `candidates/`.
+10. Bonferroni-corrected significance gate: for each SLIC segment, compute a z-score from
+    the CLT approximation of its aggregate IR-MAD chi-square evidence (sum of chi divided
+    by its expected mean/variance under the no-change null), and require
+    `z >= norm.ppf(1 - FWER_ALPHA / n_segments)` (default `FWER_ALPHA=0.05`) in addition to
+    the percentile-based hysteresis threshold below. Without this, the top-percentile
+    threshold alone always produces a "detection" in every incident regardless of whether
+    any real change occurred, since the maximum of many noisy per-segment scores drifts
+    toward 1 purely from sample size.
+11. Use dual-threshold hysteresis on confidence probabilities, ANDed with the
+    significance gate from item 10.
+12. Extract connected blobs, filter by area/elongation, rank severity from IR-MAD confidence/chi-square, keep top-N.
+13. Save candidate chips/masks/metadata under `candidates/`.
 
 ## Naming Specification (Final)
 
@@ -174,6 +193,12 @@ Per incident folder:
     paired UDM2 asset before mosaicking (no unmasked cloud/shadow/haze/snow pixels).
 15. When `USE_MOSAIC_COMPOSITES=True`, `MOSAIC_NAME_TEMPLATE` has been verified against
     the account's actual Planet plan mosaic series names (see self-check in cell 3).
+16. Mosaic-clip AOI bounds are reprojected to the mosaic quad's native CRS before
+    windowing (never window with raw WGS84 lon/lat against a non-4326 raster).
+17. Notebook 3's fused confidence includes an NDVI-loss (vegetation-stripping) channel
+    whenever 4-band optical (NIR present) is available, not just IR-MAD confidences.
+18. Notebook 3 candidates only come from segments that pass the Bonferroni-corrected
+    significance gate (item 10 above), not from percentile ranking alone.
 
 ## Addendum (2026-08-04): Monthly Mosaic composites
 
@@ -188,3 +213,34 @@ Mosaics/quads API via `USE_MOSAIC_COMPOSITES=True`, with the original per-scene
 Orders-API path (including the UDM2 masking fix) fully preserved as a fallback via the
 same toggle in both Notebook 1 and Notebook 2. `candidate_detection.ipynb` (Notebook 3)
 requires no changes, since both acquisition modes write to the same output filenames.
+
+## Addendum (2026-08-04): Mosaic-clip CRS fix + candidate-detection false-positive reduction
+
+**Mosaic-clip bug fix**: `download_mosaic_clip()` in Notebook 2 was windowing raw WGS84
+lon/lat AOI bounds directly against the mosaic quad's native transform. Planet mosaic
+quads are delivered in Web Mercator (EPSG:3857), not EPSG:4326, so this produced a
+near/exactly-0-pixel window and crashed with "Attempt to create 0x0 dataset is illegal"
+on every incident processed in composite mode. Fixed by reprojecting the AOI bbox to the
+quad's actual CRS (`rasterio.warp.transform_bounds`) before computing the window, with an
+explicit error if the corrected window is still empty (genuine no-overlap case).
+
+**Candidate-detection false positives / poor localization**: after live testing, the user
+reported the change-detection candidates had too many false positives and imprecise
+localization. Root cause was two structural gaps in Notebook 3, not the core bi-temporal
+approach itself (which remains necessary - the incident zone alone doesn't localize a
+slide, per the design principle above; single-image detection was explicitly ruled out):
+1. `HIGH_CONF_PERCENTILE`/`LOW_CONF_PERCENTILE` thresholding alone always produced a
+   "detection" in every incident, since the maximum of many independent per-segment
+   change scores drifts toward 1 by chance as segment count grows, even with zero real
+   change anywhere in the AOI. Fixed with the Bonferroni-corrected significance gate
+   (Notebook 3, required behavior item 10 and Acceptance Checklist item 18).
+2. Raw-band IR-MAD treats any spectral difference (crop harvest, phenology, cloud
+   residue) as equally suspicious as real landslide change. Fixed by fusing in an
+   NDVI-loss (vegetation-stripping) channel - the actual landslide spectral signature -
+   alongside the IR-MAD confidences (Notebook 3, required behavior item 7 and Acceptance
+   Checklist item 17).
+
+Not yet addressed (flagged as follow-up, out of scope for this addendum): SAR
+orbit-direction matching for pre/post scene pairs, an explicit susceptibility/road/water
+exclusion mask beyond the existing slope mask, and explicit before/after co-registration
+verification.

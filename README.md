@@ -75,10 +75,18 @@ a `raw_images/download_log.csv` records per-incident upload status.
 ### 3. `candidate_detection.ipynb`
 Runs bi-temporal **IR-MAD** (Iteratively Re-weighted Multivariate Alteration Detection)
 change detection separately on the optical 4-band pair (before/after, common
-Red/Green/Blue/NIR subset) and the SAR VV/VH pair, fuses the two confidence maps, applies
-a slope mask (`>= 20°`), and segments with SLIC superpixels sized to a target ~30 m
-physical footprint. A statistical hysteresis threshold (calibrated IR-MAD confidence,
-high/low significance) turns the fused confidence map into a binary mask; connected
+Red/Green/Blue/NIR subset) and the SAR VV/VH pair. A third evidence channel - NDVI drop
+from before to after (vegetation-loss/bare-soil exposure, the actual landslide spectral
+signature, as opposed to IR-MAD's raw spectral distance which fires equally for any
+change such as crop harvest or phenology) - is fused in alongside them via an N-way
+geometric mean (whichever of optical/SAR/NDVI-loss are available for that incident).
+The fused confidence map is masked to slope `>= 20°` and segmented with SLIC superpixels
+sized to a target ~30 m physical footprint. A per-segment **Bonferroni-corrected
+significance gate** (`FWER_ALPHA=0.05`, based on a CLT z-score over the segment's
+aggregate IR-MAD chi-square evidence) is required in addition to the existing
+high/low-percentile hysteresis threshold, so an incident with no statistically real
+change anywhere now correctly produces 0 candidates instead of the old percentile-only
+threshold always flagging the top percentile of whatever noise was present. Connected
 components are filtered by area/elongation, scored, and ranked. All rasters are
 reprojected onto a common analysis grid (EPSG:4326, ~10 m — matching GEE's native
 sampling) before IR-MAD so before/after/SAR/slope pixels are spatially aligned regardless
@@ -86,7 +94,7 @@ of each source's native CRS/resolution.
 
 Outputs are uploaded under `candidates/` on Hugging Face:
 - `candidates/incident_{ID}/candidate_{N}/incident_{ID}_candidate_{N}_{before,after,slope,mask}.tif`
-  — per-candidate chips (bbox padded by 100 m), one folder per ranked candidate, including
+  — per-candidate chips (bbox padded by 300 m), one folder per ranked candidate, including
   a clipped binary change-mask chip alongside before/after/slope. There is no
   whole-incident mask or JSON metadata file — only these per-candidate outputs.
 - `candidates/candidate_status.csv` — per-incident run status; the presence of any file
@@ -140,6 +148,12 @@ Planet order names follow `incident_{ID}_planet_after` / `incident_{ID}_planet_b
   (`USE_MOSAIC_COMPOSITES=True`), with the old per-scene order path kept intact and
   selectable via the same toggle in both `planet_order_creation.ipynb` and
   `incident_download.ipynb`.
+- Fixed a CRS-mismatch bug in the Mosaic-composite download path (`download_mosaic_clip`
+  windowed with raw WGS84 degrees against Web-Mercator quads, crashing with "0x0 dataset"
+  on every incident) by reprojecting the AOI bbox to the mosaic's native CRS first.
+- Added a Bonferroni-corrected statistical significance gate and an NDVI-loss fusion
+  channel to `candidate_detection.ipynb` to reduce false positives and improve
+  localization (see Notebook 3 summary above).
 
 ## Work under progress / not yet run on Kaggle
 - End-to-end execution and validation of the 3-notebook pipeline against the full
@@ -149,5 +163,8 @@ Planet order names follow `incident_{ID}_planet_after` / `incident_{ID}_planet_b
   available on the account's Planet plan (a one-time self-check in
   `incident_download.ipynb` cell 3 prints real sample names for this) before the
   Mosaic-composite path can be trusted in production.
+- Validate the new significance-gate/NDVI-fusion candidate detection changes against a
+  batch of real incidents (false-positive rate and localization accuracy not yet
+  re-measured after the fix).
 - SAM2 / segmentation refinement stage downstream of candidate detection (out of
   scope for the current 3 notebooks, per `REFINED_PIPELINE_SPEC.md`).
