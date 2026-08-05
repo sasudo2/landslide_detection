@@ -1,148 +1,79 @@
-# Planet Mosaic Quality Runbook
+# Planet Mosaic Cloud-Gating Runbook
 
-This runbook explains why monthly Planet mosaic outputs can look softer than expected,
-how this pipeline currently downloads imagery, and the exact checks required to ensure
-we are using high-fidelity SR mosaics for landslide analysis.
+This runbook documents the current monthly Planet mosaic behavior in this repository.
+It focuses on cloud-based selection and operational debugging.
 
 ## Scope
 
 Applies to [incident_download.ipynb](incident_download.ipynb) when
-USE_MOSAIC_COMPOSITES is enabled.
+`USE_MOSAIC_COMPOSITES=True`.
 
-## Executive Summary
+## Current Policy (As Implemented)
 
-When a 4.77 m monthly mosaic appears worse than expected, the cause is usually one of:
+Monthly mosaic selection uses AOI quad cloud metadata checks only.
 
-1. Viewer/tile downsampling path instead of true GeoTIFF download.
-2. Wrong product family (Visual RGB/8-bit vs SR/4-band/16-bit).
-3. SR normalization/seam-blending tradeoffs in composited products.
-4. Month/region source-scene scarcity (monsoon cloud, steep terrain, low clear-scene density).
+- `MOSAIC_MAX_AOI_CLOUD` controls max allowed AOI cloud percentage.
+- `STRICT_MOSAIC_CLOUD_CHECK` controls behavior when quad cloud metadata is missing:
+  - `True`: reject that mosaic month.
+  - `False`: allow that mosaic month.
+- The notebook does not enforce SR/analytic product-type checks.
 
-In this repository's current notebook path, downloads come from the Basemaps API quads
-endpoint and are clipped locally, so issue #1 is usually ruled out.
+## Download Path
 
-## Current Download Path (What The Notebook Actually Does)
+With `USE_MOSAIC_COMPOSITES=True`, the notebook:
 
-With USE_MOSAIC_COMPOSITES=True, the notebook:
+1. Finds after/before monthly mosaics by name template.
+2. Queries quad coverage for each incident AOI.
+3. Evaluates AOI cloud from quad metadata.
+4. Selects the first month in range that passes the cloud gate.
+5. Downloads quad GeoTIFFs, mosaics if needed, clips to AOI.
 
-1. Finds before/after monthly mosaics.
-2. Calls the Basemaps quads endpoint for AOI coverage.
-3. Downloads quad GeoTIFFs from each quad's _links.download URL.
-4. Mosaics and clips to incident AOI.
+This is native raster download via Basemaps quads API links, not tile/screenshot flow.
 
-This is native raster download flow, not WMTS/XYZ screenshot flow.
+## Common Log Messages
 
-## Quality Policy Implemented In Notebook
+Accepted month:
 
-The notebook now enforces strict SR quality checks by default:
+- `Selected after-mosaic ... (AOI cloud X.XX% across N quad(s))`
+- `Selected before-mosaic ... (AOI cloud X.XX% across N quad(s))`
 
-- ALLOW_VISUAL_MOSAIC_FALLBACK defaults to False.
-- Mosaic metadata is re-fetched from per-mosaic detail endpoint before quality checks.
-- Non-SR candidates are rejected unless fallback is explicitly enabled.
-- Diagnostic logs print:
-  - selected template
-  - fallback policy
-  - datatype, bands, product_type
+Rejected month due to cloud value:
 
-Additional hardening (2026-08-05):
+- `Rejected after-mosaic ... AOI cloud X.XX% > Y.YY%`
+- `Rejected before-mosaic ... AOI cloud X.XX% > Y.YY%`
 
-- Fail-closed metadata policy:
-   - STRICT_MOSAIC_METADATA_CHECK=True
-   - Missing/ambiguous metadata is treated as unverifiable and rejected by default.
-- Reduced string-matching fragility:
-   - strong pass is primarily numeric (uint16 + band_count>=4), not naming keywords.
-   - ALLOW_SR_KEYWORD_FALLBACK=False by default (optional compatibility mode only).
-- Post-download validation:
-   - every optical output is opened with rasterio and must satisfy
-      dtype==uint16 and band_count>=4, or it is removed and logged as rejected.
-- Explicit incident issue tracking:
-   - quality/availability failures are appended to per-incident issues and persisted
-      in download_log.csv, preventing silent coverage gaps.
-- Mixed-fidelity protection:
-   - uploaded status becomes uploaded_with_warnings when issues exist, with details
-      in error text to make any schema inconsistency visible.
+Rejected month due to missing metadata in strict mode:
 
-### SR acceptance heuristics
+- `Rejected after-mosaic ... cloud metadata unavailable for AOI quads`
+- `Rejected before-mosaic ... cloud metadata unavailable for AOI quads`
 
-A mosaic is accepted when it appears SR-like based on metadata:
+No month selected in search window:
 
-- Positive signals:
-  - product_type includes analytic/surface_reflectance/sr, or
-  - datatype looks uint16, and
-  - bands is unknown or >= 4.
-- Negative signals:
-  - datatype is byte/uint8, or
-  - bands is present and < 4.
+- `No after-mosaic passed AOI cloud <= ... within ... month(s) forward - skipping`
+- `No before-mosaic passed AOI cloud <= ... within ... month(s) back - skipping`
 
-If negative signals are present, the mosaic is rejected unless
-ALLOW_VISUAL_MOSAIC_FALLBACK=True.
+## Why Repeated Rejection Lines Appear
 
-## Why This Matters For Notebook 3
+Repeated lines for the same month can happen when multiple incidents are processed in
+parallel (`MAX_WORKERS > 1`) and each incident evaluates the same candidate month.
 
-Candidate detection uses four optical channels and NDVI-driven evidence. Visual
-products (typically 8-bit RGB+alpha) degrade or invalidate NIR-dependent workflows.
-Strict SR gating prevents silent quality regressions in downstream IR-MAD/NDVI fusion.
+## Configuration Checklist Before Batch Runs
 
-## Configuration Checklist Before A Production Run
+1. Confirm `MOSAIC_NAME_TEMPLATE` matches available account series names.
+2. Decide strictness:
+   - keep `STRICT_MOSAIC_CLOUD_CHECK=True` for fail-closed behavior,
+   - set to `False` if missing metadata should not block downloads.
+3. Set `MOSAIC_MAX_AOI_CLOUD` to your tolerance (lower is stricter).
+4. Validate on one incident (`START_IDX`/`END_IDX`) before full batch.
 
-1. Keep USE_MOSAIC_COMPOSITES aligned between notebook 1 and notebook 2.
-2. Verify MOSAIC_NAME_TEMPLATE resolves to SR products on the current Planet plan.
-3. Keep ALLOW_VISUAL_MOSAIC_FALLBACK=False for analysis-quality runs.
-4. Run one-incident smoke test before full batch.
+## Operational Guidance
 
-## One-Incident Validation Procedure
+If too many incidents are skipped in composite mode:
 
-1. In notebook configuration:
-   - START_IDX and END_IDX to isolate one known incident.
-2. Run auth/init cell and inspect logs:
-   - sample monthly mosaic names
-   - per-mosaic datatype/bands/product_type
-   - template and fallback policy print
-3. Run download cell for that incident.
-4. Verify outputs contain expected optical files and no SR-rejection surprises.
-
-## Interpreting Log Messages
-
-Expected good path:
-
-- Planet before/after ready with selected mosaic name.
-- No rejection warning for non-SR mosaic.
-
-Expected protective rejection path:
-
-- Rejecting non-SR mosaic '<name>' (datatype=..., bands=..., product_type=...)
-- Set ALLOW_VISUAL_MOSAIC_FALLBACK=True only if you explicitly accept lower-fidelity Visual mosaics.
-
-This rejection is intentional and prevents low-quality/unsupported optical inputs from
-silently entering the training/detection flow.
-
-Additional explicit issue examples now persisted in download_log.csv:
-
-- after_mosaic_missing_or_rejected_quality (...)
-- before_mosaic_missing_or_rejected_quality (...)
-- incident_<id>_after: dtype=... != required uint16
-- incident_<id>_planet_before: band_count=... < required 4
-- gee_before_no_cloud_free_scene
-
-If a run partially succeeds (ancillary files uploaded but optical warnings exist), the
-status is uploaded_with_warnings and the warning list is preserved in the error field.
-
-## If SR Mosaics Are Unavailable On The Account
-
-Options, in priority order:
-
-1. Select a different monthly SR series available on the plan and update template.
-2. Temporarily switch to per-scene mode with UDM2 masking:
-   - USE_MOSAIC_COMPOSITES=False
-3. As last resort, set ALLOW_VISUAL_MOSAIC_FALLBACK=True for exploratory visualization
-   only, not for quantitative analysis.
-
-## Known Tradeoff Notes
-
-Even correct SR monthly mosaics can still look softer than native daily scenes due to
-compositing, normalization, and seam handling. This is expected. For highest per-scene
-sharpness in difficult months, per-scene download mode may outperform monthly mosaics at
-the cost of more operational complexity.
+1. Increase month search windows (`MOSAIC_FORWARD_MONTHS`, `MOSAIC_BACKWARD_MONTHS`).
+2. Relax `MOSAIC_MAX_AOI_CLOUD` if your use case permits.
+3. Set `STRICT_MOSAIC_CLOUD_CHECK=False` if metadata sparsity is common.
+4. Switch to `USE_MOSAIC_COMPOSITES=False` to use legacy per-scene path with UDM2 masking.
 
 ## Related Files
 

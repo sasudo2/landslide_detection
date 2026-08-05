@@ -92,8 +92,10 @@ Use all practical fields for traceability:
      native CRS (typically Web Mercator, EPSG:3857, not WGS84) - the AOI bbox must be
      reprojected to the quad's CRS (`rasterio.warp.transform_bounds`) before computing the
      clip window, otherwise the window silently rounds to 0 pixels and crashes on write.
-     No per-scene UDM2 masking is needed here since Planet's own compositing already
-     removes cloud/shadow and normalizes color across constituent scenes.
+       No per-scene UDM2 masking is needed here since Planet's own compositing already
+       removes cloud/shadow and normalizes color across constituent scenes. Monthly mosaic
+       selection is currently gated by AOI cloud metadata only (`MOSAIC_MAX_AOI_CLOUD`,
+       `STRICT_MOSAIC_CLOUD_CHECK`) and does not enforce SR/analytic product-type checks.
    - **`False` (legacy per-scene ordering)**: download Planet after/before imagery from
      preordered incidents created by `planet_order_creation.ipynb`
      (per `order_log.csv`/live order state). Each scene's analytic SR asset must be
@@ -161,6 +163,9 @@ Use all practical fields for traceability:
     significance gate from item 10.
 12. Extract connected blobs, filter by area/elongation, rank severity from IR-MAD confidence/chi-square, keep top-N.
 13. Save candidate chips/masks/metadata under `candidates/`.
+14. Upload candidate chip files in batched create-commit operations.
+15. Write `candidate_status.csv` and `candidate_metadata.csv`, then upload them in a
+   single commit operation.
 
 ## Naming Specification (Final)
 
@@ -199,6 +204,9 @@ Per incident folder:
     whenever 4-band optical (NIR present) is available, not just IR-MAD confidences.
 18. Notebook 3 candidates only come from segments that pass the Bonferroni-corrected
     significance gate (item 10 above), not from percentile ranking alone.
+19. In Mosaic-composite mode, monthly selection is cloud-metadata-gated
+   (`MOSAIC_MAX_AOI_CLOUD`, `STRICT_MOSAIC_CLOUD_CHECK`) and does not apply
+   SR/analytic product-type rejection.
 
 ## Addendum (2026-08-04): Monthly Mosaic composites
 

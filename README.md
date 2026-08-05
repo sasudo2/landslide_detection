@@ -47,11 +47,14 @@ notebooks — keep them in sync):
   `candidate_detection.ipynb` needs no changes). Planet's own compositing already removes
   cloud/shadow/haze and normalizes color across constituent scenes, which is why this mode
   was adopted — the per-scene path below had visible cross-scene color mismatches and
-  unmasked cloud blobs in exported chips. **Caveat**: `MOSAIC_NAME_TEMPLATE` (default
+  unmasked cloud blobs in exported chips. Mosaic selection in this mode is currently gated
+  by AOI quad cloud metadata only (`MOSAIC_MAX_AOI_CLOUD`,
+  `STRICT_MOSAIC_CLOUD_CHECK`) and does not enforce SR/analytic product typing.
+  **Caveat**: `MOSAIC_NAME_TEMPLATE` (default
   `'global_monthly_{year}_{month:02d}_mosaic'`) must match your Planet plan's actual mosaic
   series naming — a one-time self-check prints a sample of real mosaic names available to
   the account right after Planet auth in cell 3; adjust the template if they don't match.
-  Monthly analytic mosaics are also coarser (~4.77 m) than native PlanetScope (~3 m).
+  Monthly mosaics are also generally coarser (~4.77 m) than native PlanetScope (~3 m).
 - **`USE_MOSAIC_COMPOSITES=False` (legacy per-scene path)**: downloads the Planet
   `..._planet_after` / `..._planet_before` order's result(s) (using live order state from
   `raw_images/order_log.csv`) and mosaics multi-scene orders into a single file. Each
@@ -100,6 +103,8 @@ Outputs are uploaded under `candidates/` on Hugging Face:
 - `candidates/candidate_status.csv` — per-incident run status; the presence of any file
   under `candidates/incident_{ID}/` is also used to skip incidents already processed on
   re-runs.
+- `candidates/candidate_metadata.csv` — per-candidate metadata table
+  (`incident_id`, `candidate_id`, `area_m2`, `elongation`, `severity`, `score`, bbox lon/lat).
 
 ## Naming conventions (Hugging Face, repo `sasudo2/landslides`)
 
@@ -117,6 +122,7 @@ raw_images/
     incident_{ID}_gee_aspect.tif
 candidates/
   candidate_status.csv
+  candidate_metadata.csv
   incident_{ID}/candidate_{N}/
     incident_{ID}_candidate_{N}_before.tif
     incident_{ID}_candidate_{N}_after.tif
@@ -148,12 +154,17 @@ Planet order names follow `incident_{ID}_planet_after` / `incident_{ID}_planet_b
   (`USE_MOSAIC_COMPOSITES=True`), with the old per-scene order path kept intact and
   selectable via the same toggle in both `planet_order_creation.ipynb` and
   `incident_download.ipynb`.
+- Current monthly-composite selection is cloud-metadata-gated (`MOSAIC_MAX_AOI_CLOUD`,
+  `STRICT_MOSAIC_CLOUD_CHECK`) and no longer enforces SR/analytic product-type checks.
 - Fixed a CRS-mismatch bug in the Mosaic-composite download path (`download_mosaic_clip`
   windowed with raw WGS84 degrees against Web-Mercator quads, crashing with "0x0 dataset"
   on every incident) by reprojecting the AOI bbox to the mosaic's native CRS first.
 - Added a Bonferroni-corrected statistical significance gate and an NDVI-loss fusion
   channel to `candidate_detection.ipynb` to reduce false positives and improve
   localization (see Notebook 3 summary above).
+- Candidate chip uploads are batched via commit operations, and summary CSVs
+  (`candidate_status.csv`, `candidate_metadata.csv`) are committed together in one
+  create-commit operation.
 
 ## Work under progress / not yet run on Kaggle
 - End-to-end execution and validation of the 3-notebook pipeline against the full
