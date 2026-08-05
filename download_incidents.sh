@@ -25,7 +25,7 @@ set -euo pipefail
 #   ./download_incidents.sh ./data              # all -> ./data
 
 TOKEN="${HF_TOKEN:-}"
-REPO="sasudo2/landslides"
+REPO="sasudo2/test"
 OUTDIR="./incidents"
 RANGE_ARGS=()
 
