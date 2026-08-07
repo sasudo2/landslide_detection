@@ -1,56 +1,51 @@
-# Planet Monthly Selection and Fallback Runbook
+# Planet Quarterly Composite Selection Runbook
 
-This runbook documents the current Planet path in `incident_download.ipynb`.
+This runbook documents the current Planet path in `incident_download.ipynb`: pulling before/after optical imagery from **precomputed quarterly Planet mosaic composites** via the Mosaics/quads API.
 
 ## Scope
 
-Applies to monthly selection, quality scoring, and daily fallback behavior.
+Applies to quarterly composite discovery, quad download/clip, and the GEE support-layer fallback. There is no per-scene order creation or order log in this flow.
 
 ## End-to-end selection flow
 
-For each incident side (before/after):
-1. Build incident-centered monthly search space.
-2. Enumerate month candidates directionally by side:
-  - before: months before incident month,
-  - after: incident month and later,
-  - width controlled by `MONTH_RADIUS`.
-3. Query mosaics by both naming patterns.
-4. Reject visual-like metadata candidates.
-5. Query quads over AOI and apply cloud gate.
-6. Download and merge quads, clip to AOI.
-7. Verify file has >=4 bands.
-8. Compute quality score and keep nearest valid candidate (higher score as tie-breaker).
-9. If best score is below floor, run daily fallback through quick-search + Orders API.
-10. In fallback, reject scene if UDM2 cloud percent is above threshold.
+For each incident:
+1. Clamp the AOI extent to `MAX_AOI_DEG`.
+2. Select the after mosaic:
+   - anchor at the incident date's quarter,
+   - scan forward up to `MOSAIC_FORWARD_PERIODS` quarters for the first published mosaic,
+   - query by name with `MOSAIC_NAME_TEMPLATE`.
+3. Select the before mosaic:
+   - start 1 quarter before the incident quarter (`MOSAIC_BACKWARD_START`),
+   - scan back up to `MOSAIC_BACKWARD_PERIODS` quarters for the first published mosaic.
+4. For the selected mosaic (if any):
+   - query AOI-intersecting quads via the bbox,
+   - download each quad GeoTIFF,
+   - merge quads if more than one,
+   - window-clip to the exact incident bbox (transforming the bbox to the mosaic CRS, typically EPSG:3857).
+5. Save outputs:
+   - `incident_{ID}_after.tif`
+   - `incident_{ID}_planet_before.tif`
+6. Download GEE support layers (when EE initializes):
+   - `incident_{ID}_gee_before.tif` (Sentinel-2 before fallback, if a cloud-free scene exists),
+   - `incident_{ID}_sar_pre.tif`, `incident_{ID}_sar_post.tif` (Sentinel-1 VV,VH),
+   - `incident_{ID}_slope.tif`, `incident_{ID}_gee_aspect.tif` (SRTM).
+7. Upload every downloaded TIFF to `raw_images/raw_incidents/incident_{ID}/` on Hugging Face and append a row to `download_log.csv`.
 
 ## Critical configuration
 
-- `MONTH_RADIUS`: monthly search width around incident month (default 6).
-- `BEFORE_OFFSET_MONTHS`, `AFTER_OFFSET_MONTHS`: kept at 0 for incident-centered behavior.
-- `MOSAIC_MAX_AOI_CLOUD`: max average AOI cloud percent accepted from quad metadata.
-- `STRICT_MOSAIC_CLOUD_CHECK`:
-  - `True`: reject candidate if cloud metadata missing.
-  - `False`: allow candidate when cloud metadata missing.
-- `MIN_MONTHLY_QUALITY`: minimum acceptable monthly score.
-- `DAILY_SEARCH_WINDOW_DAYS`: daily fallback search span around target date.
-- `DAILY_SCENE_CLOUD_MAX`: quick-search scene cloud filter.
-- `DAILY_MAX_UDM2_CLOUD_PCT`: strict acceptance threshold after UDM2 evaluation.
-
-## Monthly quality score composition
-
-The quality score is a weighted combination of:
-- valid coverage fraction (weight 0.35),
-- NIR sharpness from Laplacian-variance proxy (weight 0.30),
-- contrast metric (weight 0.25),
-- inverse haze fraction heuristic (weight 0.10).
-
-Score range is `[0,1]`. Candidates below `MIN_MONTHLY_QUALITY` do not pass monthly selection.
+- `USE_MOSAIC_COMPOSITES`: must be `True` (this is the primary path; the per-scene Orders branch is legacy).
+- `MOSAIC_CADENCE`: `'quarterly'`.
+- `MOSAIC_NAME_TEMPLATE`: name pattern for discovery (default `global_quarterly_{year}q{quarter}_mosaic`). Must match what the Planet account actually publishes.
+- `MOSAIC_FORWARD_PERIODS`: after-side scan width (quarters).
+- `MOSAIC_BACKWARD_START` / `MOSAIC_BACKWARD_PERIODS`: before-side scan start and width (quarters).
+- `PRE_DAYS` / `POST_DAYS`: GEE Sentinel-2/SAR temporal windows around the incident date.
+- `CLOUD_MAX_AOI`: max AOI cloud fraction for the GEE Sentinel-2 before fallback.
+- `MAX_AOI_DEG`: maximum degree span an AOI is clamped to.
 
 ## Artifacts written per incident
 
-- `incident_{ID}_before.tif`
 - `incident_{ID}_after.tif`
-- `incident_{ID}_quality_report.json`
+- `incident_{ID}_planet_before.tif`
 - support layers when available:
   - `incident_{ID}_gee_before.tif`
   - `incident_{ID}_sar_pre.tif`
@@ -58,44 +53,30 @@ Score range is `[0,1]`. Candidates below `MIN_MONTHLY_QUALITY` do not pass month
   - `incident_{ID}_slope.tif`
   - `incident_{ID}_gee_aspect.tif`
 
-The quality report includes:
-- evaluated monthly candidates and reject reasons,
-- selected mode (`monthly_mosaic` or `daily_fallback`) per side,
-- selected candidate details and score,
-- fallback trigger reason,
-- incident-level status and error (if failed).
-
 ## Rerun behavior
 
-- `run_manifest.json` is updated after each incident.
-- Incidents already marked success are skipped on rerun.
-- Batch-level outputs are collected into `run_summary.csv` and `final_summary.json`.
+- Incidents that already have every mandatory file on Hugging Face are skipped up front.
+- `download_log.csv` is overwritten with the current run's per-incident records.
 
 ## Common failure reasons
 
-- `no_valid_monthly_candidate`
-- `best_monthly_below_quality_floor:*`
-- `No daily PSScene found in fallback search window`
-- `Daily fallback rejected: UDM2 cloud ...`
-- `Daily fallback SR has ... bands (<4)`
-- order timeout or API failures
+- `No published after-mosaic found ...` (no mosaic published in the forward window)
+- `No published before-mosaic found ...` (no mosaic published in the backward window)
+- `No quads found covering ...` (mosaic exists but has no data over the AOI)
+- `AOI does not intersect mosaic quad data` (empty window after bbox transform)
+- GEE download failures for support layers (logged per-asset, do not abort the run)
 
 ## Tuning guidance
 
-If too many incidents fail monthly path:
-1. Increase `MONTH_RADIUS`.
-2. Relax `MOSAIC_MAX_AOI_CLOUD`.
-3. Lower `MIN_MONTHLY_QUALITY` modestly.
-
-If too many incidents fail fallback path:
-1. Increase `DAILY_SEARCH_WINDOW_DAYS`.
-2. Relax `DAILY_SCENE_CLOUD_MAX` modestly.
-3. Relax `DAILY_MAX_UDM2_CLOUD_PCT` only if acceptable for downstream quality.
+If too many incidents find no mosaic:
+1. Increase `MOSAIC_FORWARD_PERIODS` (after) or `MOSAIC_BACKWARD_PERIODS` (before).
+2. Verify `MOSAIC_NAME_TEMPLATE` matches the account's published quarterly series (the notebook prints sample series names on startup).
+3. Confirm `MOSAIC_CADENCE` matches the series interval actually available.
 
 ## Validation checklist for production runs
 
-1. Confirm `PL_API_KEY` is set.
+1. Confirm `PL_API_KEY` and HF token secrets are set.
 2. Dry-run with a small row range (`START_IDX`, `END_IDX`).
-3. Inspect several `incident_{ID}_quality_report.json` files.
-4. Confirm final summary counts align with per-incident outcomes.
-5. Confirm candidate notebook consumes generated before/after/support files successfully.
+3. Verify the printed sample mosaic series names match `MOSAIC_NAME_TEMPLATE`.
+4. Inspect several `incident_{ID}_after.tif` / `incident_{ID}_planet_before.tif` outputs for the expected AOI extent.
+5. Confirm the candidate notebook consumes generated before/after/support files successfully.

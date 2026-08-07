@@ -7,6 +7,8 @@ This document is the authoritative spec for the current notebook pipeline in thi
 1. `incident_download.ipynb`
 2. `candidate_detection.ipynb`
 
+`planet_order_creation.ipynb` is not part of the current pipeline and can be ignored.
+
 ## Global rules
 
 1. Input CSV path:
@@ -14,92 +16,61 @@ This document is the authoritative spec for the current notebook pipeline in thi
 2. Required CSV columns:
    `id,title,incident_on,min_lon,min_lat,max_lon,max_lat`
 3. Incident filtering is row index based (`START_IDX`, `END_IDX`).
-4. Planet auth source is environment variable `PL_API_KEY`.
-5. Incident download is monthly-first with daily fallback, no legacy toggle branch.
-6. All incident runs must be rerun-safe via local manifest and per-incident status.
+4. Planet auth source is environment variable `PL_API_KEY` (used against the Mosaics/quads API).
+5. Optical before/after imagery is sourced from **precomputed quarterly Planet mosaic composites** via the Mosaics/quads API. No per-scene order creation, order log, or order polling is used.
+6. All incident uploads go to Hugging Face under `raw_images/raw_incidents/incident_{ID}/` (rerun-safe via pre-upload existence checks).
 
 ## Notebook 1: incident_download.ipynb
 
 ### Required behavior
 
-1. Read selected incident rows and clamp AOI extent to a configured maximum degree span.
-2. Use incident-centered directional month search:
-   - before side evaluates only months before the incident month,
-   - after side evaluates incident month and later,
-   - search span is controlled by `MONTH_RADIUS` (default 6).
-3. For each side (before/after), evaluate monthly candidate mosaics in the side-appropriate incident-centered window.
-4. Monthly mosaic discovery must try both naming patterns:
-   - `global_monthly_{year}_{month:02d}_mosaic`
-   - `ps_monthly_analytic_sr_subscription_{year}_{month:02d}_mosaic`
-5. For each monthly candidate mosaic:
-   - perform metadata screen to reject visual-like mosaics (`datatype` byte/uint8 or `< 4` bands when specified),
-   - query AOI-intersecting quads,
-   - apply cloud gate from quad metadata (`MOSAIC_MAX_AOI_CLOUD`, `STRICT_MOSAIC_CLOUD_CHECK`),
-   - download quad GeoTIFFs,
-   - merge quads,
-   - clip to AOI via polygon masking,
-   - verify real output file has at least 4 bands.
-6. Score valid monthly candidates using quality metrics:
-   - valid pixel fraction,
-   - NIR sharpness (Laplacian variance-derived),
-   - contrast,
-   - haze proxy.
-7. Select nearest valid monthly candidate first, then higher score as tie-breaker.
-8. If no monthly candidate passes `MIN_MONTHLY_QUALITY`, trigger daily fallback:
-   - run Data API quick-search for `PSScene` around an incident-proximal, side-aware date window,
-   - create Orders API request using `analytic_udm2` and AOI clip,
-   - poll order state with retries/timeouts,
-   - download clipped SR and UDM2 outputs,
-   - reject fallback scene if UDM2 cloud exceeds `DAILY_MAX_UDM2_CLOUD_PCT`,
-   - verify SR output has >=4 bands before accepting.
-9. Save side outputs as:
-   - `incident_{ID}_before.tif`
-   - `incident_{ID}_after.tif`
-10. Save per-incident quality report:
-    - `incident_{ID}_quality_report.json`
-11. Attempt GEE support products (when EE init succeeds):
-    - `incident_{ID}_gee_before.tif` (if available),
-    - `incident_{ID}_sar_pre.tif`,
-    - `incident_{ID}_sar_post.tif`,
-    - `incident_{ID}_slope.tif`,
-    - `incident_{ID}_gee_aspect.tif`.
-12. Update and persist manifest after each incident.
-13. Persist run-level outputs:
-    - `run_summary.csv`
-    - `final_summary.json`
-
-### Required run-level accounting
-
-`final_summary.json` must include:
-- total incidents processed,
-- monthly success count,
-- daily fallback success count,
-- failure count,
-- aggregated failure reasons.
+1. Read selected incident rows and clamp AOI extent to a configured maximum degree span (`MAX_AOI_DEG`).
+2. Use `USE_MOSAIC_COMPOSITES = True` (the primary path) with `MOSAIC_CADENCE = 'quarterly'`.
+3. Select the after mosaic: anchor at the incident date's quarter, scan forward `MOSAIC_FORWARD_PERIODS` quarters for the first published mosaic.
+4. Select the before mosaic: start `MOSAIC_BACKWARD_START` (1) quarter before the incident quarter, scan back `MOSAIC_BACKWARD_PERIODS` quarters.
+5. Mosaic discovery uses the name pattern `MOSAIC_NAME_TEMPLATE` (`global_quarterly_{year}q{quarter}_mosaic`). On startup the notebook prints sample series names and their datatype/bands so the template can be corrected if it resolves to the wrong (e.g. 8-bit Visual) product.
+6. For each selected mosaic:
+   - query AOI-intersecting quads via a bbox query,
+   - download each quad GeoTIFF,
+   - merge quads if there is more than one,
+   - window-clip to the exact incident bbox (transforming the bbox into the mosaic CRS, typically EPSG:3857),
+   - write `incident_{ID}_after.tif` and `incident_{ID}_planet_before.tif`.
+7. Download GEE support layers (only when EE initializes), each in its own try/except:
+   - `incident_{ID}_gee_before.tif` (Sentinel-2 before fallback, if a scene with AOI cloud ≤ `CLOUD_MAX_AOI` exists),
+   - `incident_{ID}_sar_pre.tif`, `incident_{ID}_sar_post.tif` (Sentinel-1 VV,VH),
+   - `incident_{ID}_slope.tif`, `incident_{ID}_gee_aspect.tif` (SRTM-based).
+8. Upload every downloaded TIFF to Hugging Face in batched commits (`UPLOAD_BATCH_SIZE`), skipping incidents whose mandatory files already exist on HF.
+9. Write run-level accounting to `download_log.csv` (per-incident status/error counts).
 
 ### Reliability requirements
 
 1. HTTP requests use retry/backoff for transient server/rate-limit failures.
-2. Partial file writes use temporary files and atomic replace.
-3. Per-incident failures are isolated and do not crash the whole batch.
-4. Manifest-based skipping must prevent reprocessing incidents already marked successful.
+2. Partial downloads use temporary files and atomic replace.
+3. Per-asset/per-incident failures are isolated and do not crash the whole batch.
+4. Upload batches carefully (Hugging Face `create_commit` with `CommitOperationAdd`).
 
 ## Notebook 2: candidate_detection.ipynb
 
 ### Required behavior
 
-1. Read incident rasters from the generated incident folders.
-2. Run change-based candidate extraction logic.
-3. Emit candidate chip folders and per-candidate metadata.
-4. Upload candidate artifacts to Hugging Face using batched commit operations.
-5. Upload `candidate_status.csv` and `candidate_metadata.csv` together in one commit.
+1. Discover incidents that have complete raw imagery on Hugging Face (`after.tif`, `planet_before.tif` or `gee_before.tif`, `slope.tif`, `sar_pre.tif`, `sar_post.tif`).
+2. Skip incidents that already have candidate outputs on HF (idempotent re-runs).
+3. Reproject optical, SAR, and slope onto one common grid (`EPSG:4326`, ~10 m).
+4. Run change-based candidate extraction:
+   - optical change confidence via IR-MAD on RGB channels (the quarterly composites are RGB/visual mosaics, so NDVI/NIR loss fusion is skipped),
+   - SAR change confidence via IR-MAD on VV/VH,
+   - slope mask (`MIN_SLOPE_DEG`) to constrain detection to steep terrain,
+   - geometric-mean fusion of available modalities, multiplied by the slope mask.
+5. Generate candidates via SLIC superpixels, per-segment significance test (Bonferroni-controlled), hysteresis thresholding, morphology/blob filters, and area×severity ranking.
+6. Export per-candidate chips: `before`, `after` (at native source resolution), `slope`, `mask` (on the analysis grid).
+7. Upload candidate artifacts to Hugging Face using batched commit operations.
+8. Upload `candidate_status.csv` and `candidate_metadata.csv` together in one commit.
 
 ## Naming specification
 
 Per incident folder:
-- `incident_{ID}_before.tif`
 - `incident_{ID}_after.tif`
-- `incident_{ID}_quality_report.json`
+- `incident_{ID}_planet_before.tif`
 - `incident_{ID}_gee_before.tif` (if available)
 - `incident_{ID}_sar_pre.tif` (if available)
 - `incident_{ID}_sar_post.tif` (if available)
@@ -107,21 +78,24 @@ Per incident folder:
 - `incident_{ID}_gee_aspect.tif` (if available)
 
 Run-level files:
-- `run_manifest.json`
-- `run_summary.csv`
-- `final_summary.json`
+- `download_log.csv`
+
+Candidate outputs under `candidates/`:
+- `candidates/incident_{ID}/candidate_{k}/...`
+- `candidates/candidate_status.csv`
+- `candidates/candidate_metadata.csv`
 
 ## Acceptance checklist
 
 1. Index-range filtering works (`START_IDX`, `END_IDX`).
-2. Monthly discovery checks both naming patterns in an incident-centered directional window.
-3. Monthly candidates are screened by metadata and by real-file band count.
-4. Cloud gate is enforced from quad metadata with strict/non-strict behavior.
-5. Quality scoring is computed and best monthly candidate is selected by score.
-6. Daily fallback is triggered when monthly quality is insufficient.
-7. Daily fallback enforces UDM2 cloud threshold and >=4-band SR verification.
-8. Incident quality JSON is written for every incident (success or failure).
-9. Manifest skip behavior makes reruns idempotent for successful incidents.
-10. Final summary includes monthly vs fallback success accounting and failure reasons.
-11. Candidate notebook uploads chip outputs in batch commits.
-12. Candidate summary CSVs are uploaded in a single commit.
+2. AOI extent is clamped to `MAX_AOI_DEG`.
+3. `USE_MOSAIC_COMPOSITES` is `True` with `MOSAIC_CADENCE = 'quarterly'`.
+4. After mosaic selected by quarter-anchored forward scan; before mosaic selected by quarter-anchored backward scan.
+5. Mosaic discovery uses `MOSAIC_NAME_TEMPLATE`, and the notebook reports the account's existing series to validate the template.
+6. Quads are downloaded, merged, and window-clipped to the exact AOI bbox (CRS-aware).
+7. `incident_{ID}_after.tif` and `incident_{ID}_planet_before.tif` are written.
+8. GEE support layers are attempted independently and never abort the run on failure.
+9. Per-incident uploads to HF are batched, and already-complete incidents are skipped on rerun.
+10. `download_log.csv` records per-incident status.
+11. Candidate notebook skips incidents lacking mandatory raw files and skips incident with existing candidates.
+12. Candidate notebook uploads chip outputs in batch commits; summary CSVs uploaded in a single commit.

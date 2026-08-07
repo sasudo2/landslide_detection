@@ -3,20 +3,19 @@
 This repository processes reported landslide incidents into standardized raster inputs and candidate chips for downstream review.
 
 The active processing flow is implemented in:
-1. `incident_download.ipynb` (Planet monthly-first download + daily fallback + GEE support layers)
+1. `incident_download.ipynb` (Planet quarterly composite download + GEE support layers)
 2. `candidate_detection.ipynb` (change-based candidate extraction and candidate uploads)
+
+`planet_order_creation.ipynb` is not part of the current flow and can be ignored.
 
 Hugging Face dataset repo `sasudo2/landslides` is the storage backend.
 
 ## Current status
 
-The incident download logic has been fully migrated to a single, deterministic path:
-- monthly Planet mosaic candidate discovery and scoring first,
-- daily Planet scene fallback only when monthly quality is insufficient,
-- incident-level quality report JSON,
-- rerun-safe manifest and run summary outputs.
-
-No legacy toggle-based order-download branch is used in `incident_download.ipynb` anymore.
+The incident download logic uses precomputed **Planet quarterly mosaic composites** as the primary optical source:
+- before/after optical imagery is fetched directly from Planet's Mosaics/quads API per incident (no per-scene order submission or polling),
+- Planet's own compositing already removes cloud/shadow and normalizes color across scenes,
+- no per-scene order creation, order log, per-incident quality-report, or run manifest is used anymore.
 
 ## Notebook 1: incident_download.ipynb
 
@@ -24,50 +23,36 @@ Purpose:
 - For each incident AOI, produce before and after optical rasters plus support layers.
 
 Key behavior:
-1. Read incident rows from CSV and clamp AOI extent to bounded size.
-2. Use incident-proximal monthly search:
-   - before side evaluates months before the incident month,
-   - after side evaluates incident month and later,
-   - search width is controlled by `MONTH_RADIUS` (default 6 months around incident month).
-3. For each side (before/after), evaluate monthly Planet mosaics in that directional incident-centered window.
-4. For each monthly candidate:
-   - discover by both naming patterns:
-     - `global_monthly_{year}_{month:02d}_mosaic`
-     - `ps_monthly_analytic_sr_subscription_{year}_{month:02d}_mosaic`
-   - reject metadata that looks visual-like (`datatype` byte/uint8 or `bands < 4`)
-   - query intersecting quads and evaluate AOI cloud gate from quad metadata
-   - download quads, merge, clip to AOI
-   - verify clipped file has at least 4 bands (real-file NIR check)
-   - compute quality score from:
-     - valid pixel coverage,
-     - NIR sharpness,
-     - bandwise contrast,
-     - haze heuristic.
-5. Select nearest valid monthly candidate first, then higher score as tie-breaker.
-6. If no monthly candidate passes quality floor, fallback to daily Planet scene:
-   - Data API quick-search for PSScene near incident date (side-aware),
-   - create Orders API clip with `analytic_udm2` bundle,
-   - download SR + UDM2 clip,
-   - reject if UDM2 cloud percentage exceeds threshold,
-   - verify SR file has at least 4 bands,
-   - write fallback output.
-7. Download support layers from GEE when available:
-   - optical before fallback (`incident_{ID}_gee_before.tif` when scene exists),
+1. Read incident rows from CSV and clamp AOI extent to bounded size (`MAX_AOI_DEG`).
+2. For each side (before/after), select a precomputed quarterly Planet mosaic near the incident date:
+   - after side: the incident's own quarter, then forward up to `MOSAIC_FORWARD_PERIODS` quarters for the first published mosaic,
+   - before side: start 1 quarter before the incident quarter and search back up to `MOSAIC_BACKWARD_PERIODS` quarters,
+   - mosaic discovery uses the naming pattern `MOSAIC_NAME_TEMPLATE` (`global_quarterly_{year}q{quarter}_mosaic`).
+3. For each selected mosaic:
+   - query quads intersecting the AOI (bbox),
+   - download the quad GeoTIFFs,
+   - merge them if there is more than one,
+   - window-clip to the exact incident bbox.
+4. Write the Planet outputs:
+   - `incident_{ID}_after.tif`,
+   - `incident_{ID}_planet_before.tif`.
+5. Download GEE support layers when available:
+   - optical before fallback (`incident_{ID}_gee_before.tif` when S2 scene exists),
    - SAR pre and post (`VV,VH`),
    - slope and aspect.
-8. Write per-incident quality report JSON.
-9. Update manifest after each incident for rerun-safe operation.
-10. Write run summary CSV and final run summary JSON.
+6. Upload all downloaded TIFFs to `raw_images/raw_incidents/incident_{ID}/` on Hugging Face in batched commits.
+7. Upload a run-level `download_log.csv` summarizing per-incident outcomes.
 
 ### Authentication and environment
 
 Required:
-- `PL_API_KEY`
+- `Lokesh_planet` secret holding the Planet API key (for the Mosaics/quads API)
+- `huggingface_token` secret for Hugging Face uploads
 
 Optional (for GEE service-account init):
 - `GEE_PROJECT`
 - `GEE_SERVICE_ACCOUNT`
-- `GEE_KEY_PATH`
+- `GEE_KEY_PATH` (or `gee_json_key` secret)
 
 ## Output layout
 
@@ -75,9 +60,8 @@ Primary working outputs are generated under:
 - `/kaggle/working/raw_incidents/`
 
 Per incident:
-- `incident_{ID}/incident_{ID}_before.tif`
 - `incident_{ID}/incident_{ID}_after.tif`
-- `incident_{ID}/incident_{ID}_quality_report.json`
+- `incident_{ID}/incident_{ID}_planet_before.tif`
 - `incident_{ID}/incident_{ID}_gee_before.tif` (when available)
 - `incident_{ID}/incident_{ID}_sar_pre.tif` (when available)
 - `incident_{ID}/incident_{ID}_sar_post.tif` (when available)
@@ -85,9 +69,7 @@ Per incident:
 - `incident_{ID}/incident_{ID}_gee_aspect.tif` (when available)
 
 Run-level artifacts:
-- `run_manifest.json`
-- `run_summary.csv`
-- `final_summary.json`
+- `download_log.csv`
 
 ## Notebook 2: candidate_detection.ipynb
 
@@ -95,7 +77,7 @@ Purpose:
 - Build ranked candidate chips per incident from multi-source raster evidence.
 
 Current behavior highlights:
-- Uses available before/after/support rasters.
+- Uses available before/after/support rasters (treating the optical pair as RGB-first since the quarterly composites are color/visual mosaics).
 - Produces candidate chip outputs and metadata.
 - Uploads candidate artifacts to Hugging Face in batched commit operations.
 - Uploads `candidate_status.csv` and `candidate_metadata.csv` together in one commit.
@@ -103,5 +85,5 @@ Current behavior highlights:
 ## Related documentation
 
 - `REFINED_PIPELINE_SPEC.md`: authoritative requirements/spec checklist.
-- `MOSAIC_SOURCE_QUALITY_RUNBOOK.md`: operational runbook for monthly scoring and fallback behavior.
+- `MOSAIC_SOURCE_QUALITY_RUNBOOK.md`: operational runbook for quarterly composite selection.
 - `landslide_workflow.md`: legacy scientific workflow notes and broader methodology context.
