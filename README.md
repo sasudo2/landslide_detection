@@ -24,9 +24,10 @@ Purpose:
 
 Key behavior:
 1. Read incident rows from CSV and clamp AOI extent to bounded size (`MAX_AOI_DEG`).
-2. For each side (before/after), select a precomputed quarterly Planet mosaic near the incident date:
-   - after side: the incident's own quarter, then forward up to `MOSAIC_FORWARD_PERIODS` quarters for the first published mosaic,
-   - before side: start 1 quarter before the incident quarter and search back up to `MOSAIC_BACKWARD_PERIODS` quarters,
+2. For each side (before/after), select a precomputed quarterly Planet mosaic from Nepal's **dry season** (`DRY_SEASON_MONTHS`, default Oct–Mar, i.e. Q4 and Q1) to avoid monsoon cloud cover:
+   - after side: the nearest published dry-season quarter strictly after the incident's quarter, trying up to `MOSAIC_MAX_DRY_PERIODS_FORWARD` dry quarters,
+   - before side: the nearest published dry-season quarter strictly before the incident's quarter, trying up to `MOSAIC_MAX_DRY_PERIODS_BACK` dry quarters,
+   - the incident's own quarter is never used, so neither composite mixes pre- and post-event pixels,
    - mosaic discovery uses the naming pattern `MOSAIC_NAME_TEMPLATE` (`global_quarterly_{year}q{quarter}_mosaic`).
 3. For each selected mosaic:
    - query quads intersecting the AOI (bbox),
@@ -37,7 +38,7 @@ Key behavior:
    - `incident_{ID}_after.tif`,
    - `incident_{ID}_planet_before.tif`.
 5. Download GEE support layers when available:
-   - optical before fallback (`incident_{ID}_gee_before.tif` when S2 scene exists),
+   - optical before fallback (`incident_{ID}_gee_before.tif`: most recent cloud-free Sentinel-2 scene from dry-season months within `S2_DRY_SEASON_LOOKBACK_DAYS` before the incident),
    - SAR pre and post (`VV,VH`),
    - slope and aspect.
 6. Upload all downloaded TIFFs to `raw_images/raw_incidents/incident_{ID}/` on Hugging Face in batched commits.

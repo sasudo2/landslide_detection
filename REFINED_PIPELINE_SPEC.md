@@ -26,8 +26,8 @@ This document is the authoritative spec for the current notebook pipeline in thi
 
 1. Read selected incident rows and clamp AOI extent to a configured maximum degree span (`MAX_AOI_DEG`).
 2. Use `USE_MOSAIC_COMPOSITES = True` (the primary path) with `MOSAIC_CADENCE = 'quarterly'`.
-3. Select the after mosaic: anchor at the incident date's quarter, scan forward `MOSAIC_FORWARD_PERIODS` quarters for the first published mosaic.
-4. Select the before mosaic: start `MOSAIC_BACKWARD_START` (1) quarter before the incident quarter, scan back `MOSAIC_BACKWARD_PERIODS` quarters.
+3. Restrict optical mosaics to Nepal's dry season: a period qualifies only if all its months are in `DRY_SEASON_MONTHS` (default `(10, 11, 12, 1, 2, 3)`, so only Q4 and Q1 for quarterly cadence).
+4. Select the after mosaic: the nearest published dry-season period strictly after the incident's period (up to `MOSAIC_MAX_DRY_PERIODS_FORWARD` tried). Select the before mosaic: the nearest published dry-season period strictly before the incident's period (up to `MOSAIC_MAX_DRY_PERIODS_BACK` tried). The incident's own period is never used.
 5. Mosaic discovery uses the name pattern `MOSAIC_NAME_TEMPLATE` (`global_quarterly_{year}q{quarter}_mosaic`). On startup the notebook prints sample series names and their datatype/bands so the template can be corrected if it resolves to the wrong (e.g. 8-bit Visual) product.
 6. For each selected mosaic:
    - query AOI-intersecting quads via a bbox query,
@@ -36,7 +36,8 @@ This document is the authoritative spec for the current notebook pipeline in thi
    - window-clip to the exact incident bbox (transforming the bbox into the mosaic CRS, typically EPSG:3857),
    - write `incident_{ID}_after.tif` and `incident_{ID}_planet_before.tif`.
 7. Download GEE support layers (only when EE initializes), each in its own try/except:
-   - `incident_{ID}_gee_before.tif` (Sentinel-2 before fallback, if a scene with AOI cloud ≤ `CLOUD_MAX_AOI` exists),
+   - `incident_{ID}_gee_before.tif` (Sentinel-2 before fallback: most recent scene from `DRY_SEASON_MONTHS` within `S2_DRY_SEASON_LOOKBACK_DAYS` before the incident with AOI cloud ≤ `CLOUD_MAX_AOI`),
+   - SAR pre/post use `PRE_DAYS` / `POST_DAYS` windows (SAR is cloud-independent, so no dry-season restriction),
    - `incident_{ID}_sar_pre.tif`, `incident_{ID}_sar_post.tif` (Sentinel-1 VV,VH),
    - `incident_{ID}_slope.tif`, `incident_{ID}_gee_aspect.tif` (SRTM-based).
 8. Upload every downloaded TIFF to Hugging Face in batched commits (`UPLOAD_BATCH_SIZE`), skipping incidents whose mandatory files already exist on HF.
@@ -90,7 +91,7 @@ Candidate outputs under `candidates/`:
 1. Index-range filtering works (`START_IDX`, `END_IDX`).
 2. AOI extent is clamped to `MAX_AOI_DEG`.
 3. `USE_MOSAIC_COMPOSITES` is `True` with `MOSAIC_CADENCE = 'quarterly'`.
-4. After mosaic selected by quarter-anchored forward scan; before mosaic selected by quarter-anchored backward scan.
+4. After/before mosaics are the nearest published dry-season periods strictly after/before the incident's period.
 5. Mosaic discovery uses `MOSAIC_NAME_TEMPLATE`, and the notebook reports the account's existing series to validate the template.
 6. Quads are downloaded, merged, and window-clipped to the exact AOI bbox (CRS-aware).
 7. `incident_{ID}_after.tif` and `incident_{ID}_planet_before.tif` are written.
