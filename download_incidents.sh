@@ -63,7 +63,7 @@ import time
 from urllib.error import HTTPError, URLError
 
 from huggingface_hub import HfApi, snapshot_download
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 
 # ---------------------------------------------------------------------------
 # Whole-folder download via snapshot_download(), with quota-safe behaviour.
@@ -76,9 +76,9 @@ from huggingface_hub.errors import HfHubHTTPError
 #      The HF cache makes each retry resume where it stopped (already-cached files
 #      are not re-requested), so progress is preserved across retries and runs.
 # ---------------------------------------------------------------------------
-SNAPSHOT_WORKERS = 2
-MAX_RETRIES      = 15
-RETRY_BASE_SEC   = 5
+SNAPSHOT_WORKERS = 4
+MAX_RETRIES      = 20
+RETRY_BASE_SEC   = 10
 
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
 
@@ -104,34 +104,56 @@ def mark_downloaded(remote_path):
     with open(track_path, 'a', encoding='utf-8') as fhandle:
         fhandle.write(remote_path + '\n')
 
+def _retry_after_secs(resp):
+    if resp is None:
+        return None
+    ra = resp.headers.get('Retry-After')
+    if ra:
+        try:
+            return float(ra)
+        except ValueError:
+            return None
+    return None
+
+def _is_rate_limited(exc):
+    # 429 from an HfHubHTTPError
+    if isinstance(exc, HfHubHTTPError):
+        return exc.response is not None and exc.response.status_code == 429
+    # snapshot_download wraps a failed HEAD/resolver as LocalEntryNotFoundError;
+    # its underlying cause may be a 429. Treat any LocalEntryNotFoundError as
+    # retryable since the HF cache makes the retry resume where it stopped.
+    if isinstance(exc, LocalEntryNotFoundError):
+        return True
+    return False
+
+def _retry_after(exc):
+    resp = getattr(exc, 'response', None)
+    if isinstance(exc, HfHubHTTPError):
+        resp = exc.response
+    else:
+        # dig for the wrapped HTTPError with the response attached
+        cause = exc
+        while getattr(cause, '__cause__', None) is not None:
+            cause = cause.__cause__
+            if getattr(cause, 'response', None) is not None:
+                resp = cause.response
+                break
+    return _retry_after_secs(resp)
+
 def retry_snapshot(fn):
     attempt = 0
     while True:
         try:
             return fn()
-        except HfHubHTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            delay = None
-            if e.response is not None:
-                ra = e.response.headers.get('Retry-After')
-                if ra:
-                    try:
-                        delay = float(ra)
-                    except ValueError:
-                        delay = None
-            if status == 429:
-                attempt += 1
-                secs = delay if delay is not None else RETRY_BASE_SEC * (2 ** min(attempt, 5))
-                print(f'  [rate-limit] HTTP 429 (attempt {attempt}/{MAX_RETRIES}), sleeping {secs:.0f}s...')
-                if attempt >= MAX_RETRIES:
-                    raise
-                time.sleep(secs)
-                continue
-            raise
-        except (HTTPError, URLError, OSError) as exc:
+        except (HfHubHTTPError, LocalEntryNotFoundError, HTTPError, URLError, OSError) as e:
             attempt += 1
-            secs = RETRY_BASE_SEC * (2 + attempt)
-            print(f'  [retry] {exc!r} (attempt {attempt}/{MAX_RETRIES}), sleeping {secs:.0f}s...')
+            is_rate_limited = _is_rate_limited(e)
+            secs = _retry_after(e)
+            if secs is None:
+                secs = (RETRY_BASE_SEC * (2 ** min(attempt, 5))) if is_rate_limited \
+                    else RETRY_BASE_SEC * (2 + attempt)
+            kind = 'rate-limit' if is_rate_limited else 'retry'
+            print(f'  [{kind}] {e.__class__.__name__} (attempt {attempt}/{MAX_RETRIES}), sleeping {secs:.0f}s...')
             if attempt >= MAX_RETRIES:
                 raise
             time.sleep(secs)
