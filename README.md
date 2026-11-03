@@ -217,7 +217,13 @@ Each `<study-root>/<experiment>/` contains:
   native-resolution optical chips plus analysis-grid slope and mask chips.
 
 Local copies remain in `ablation_results/<study-root>/` (change with `--output-dir`).
-Uploads commit each incident's chips and then the variant summaries; any failure
+Within each experiment, incidents are processed in parallel (`--workers`, default 4,
+like the notebook's `MAX_WORKERS`); experiments themselves still run one after another.
+Chip uploads are batched into commits of about 100 files from the main thread, and
+CSV/JSON outputs are sorted by incident ID regardless of completion order. Results are
+identical to `--workers 1`. Lower `--workers` if Kaggle runs out of memory.
+Uploads commit chips in batches and then the variant summaries; any failure
+(including a failed upload batch, which marks those incidents failed)
 is logged with a traceback and recorded, and the command exits unsuccessfully.
 Partially uploaded runs are not silently reused. A variant folder is reserved
 before processing, and existing local/remote variants are refused: choose a new

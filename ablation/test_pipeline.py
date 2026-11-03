@@ -223,14 +223,13 @@ class DetectionTests(unittest.TestCase):
             self.assertIn("numpy", run["study"]["package_versions"])
         for call in api.upload_folder.call_args_list:
             self.assertTrue(call.kwargs["path_in_repo"].startswith("ablations/integration/"))
-        incident_uploads = [
-            call for call in api.upload_folder.call_args_list
-            if call.kwargs["path_in_repo"].endswith("/incident_8")
-        ]
-        self.assertEqual(len(incident_uploads), 6)
-        for call in incident_uploads:
-            chips = list(Path(call.kwargs["folder_path"]).glob("candidate_*/*.tif"))
-            self.assertGreaterEqual(len(chips), 4)
+        self.assertEqual(api.create_commit.call_count, 6)
+        for call in api.create_commit.call_args_list:
+            ops = call.kwargs["operations"]
+            self.assertGreaterEqual(len(ops), 4)
+            for op in ops:
+                self.assertRegex(op.path_in_repo, r"^ablations/integration/\w+/incident_8/candidate_\d+/.+\.tif$")
+                self.assertTrue(Path(op.path_or_fileobj).is_file())
         with patch.object(p, "HfApi", return_value=api), patch.object(sys, "argv", argv):
             with self.assertRaises(FileExistsError):
                 p.main()
@@ -255,7 +254,7 @@ class StudyTests(unittest.TestCase):
         self.args = argparse.Namespace(
             repo="owner/raw", output_repo="owner/results", raw_revision="main",
             output_revision="main", study_root="ablations/test", output_dir=self.root,
-            incident_ids=None, limit=None, range=None,
+            incident_ids=None, limit=None, range=None, workers=4,
         )
         self.files = {
             f"{p.RAW_ROOT}/incident_{i}/incident_{i}_{suffix}.tif"
@@ -326,6 +325,71 @@ class StudyTests(unittest.TestCase):
         self.api.upload_file.assert_called_once()
         self.api.upload_folder.assert_called_once()
         self.assertEqual(self.api.upload_folder.call_args.kwargs["path_in_repo"], "ablations/test/sar_only")
+        self.api.create_commit.assert_not_called()
+
+    def _fake_process(self, delays, upload_fail=False):
+        import threading
+        import time
+
+        active, peak, lock = [0], [0], threading.Lock()
+
+        def detect(paths, variant, settings):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(delays[paths["id"]])
+            with lock:
+                active[0] -= 1
+            return {"n_tests": 1, "z_crit": 2.0, "mask": np.zeros((2, 2), dtype=bool)}
+
+        def export(incident_id, paths, result, folder, settings):
+            chip = folder / "candidate_1" / "x.tif"
+            chip.parent.mkdir()
+            chip.write_bytes(b"x")
+            return [{"incident_id": incident_id, "candidate_id": 1, **{k: 0 for k in p.META_FIELDS[2:]}}]
+
+        if upload_fail:
+            self.api.create_commit.side_effect = OSError("hub down")
+        patches = (
+            patch.object(p, "fetch_paths", side_effect=lambda repo, rev, i, files, token: {"id": i}),
+            patch.object(p, "detect", side_effect=detect),
+            patch.object(p, "export_candidates", side_effect=export),
+        )
+        return patches, peak
+
+    def test_parallel_workers_keep_outputs_sorted_and_batch_uploads(self):
+        ids = [5, 1, 9, 3, 7, 2]
+        # Later IDs finish first so completion order differs from ID order.
+        patches, peak = self._fake_process({i: 0.3 / i for i in ids})
+        with patches[0], patches[1], patches[2], patch.object(p, "UPLOAD_BATCH_FILES", 2):
+            summary = p.run_variant(
+                self.api, self.args, {"incident_ids": ids, "raw_revision": "sha"},
+                self.files, self.root, "baseline", p.Settings(),
+            )
+        self.assertGreater(peak[0], 1)
+        self.assertEqual(summary["n_candidates"], 6)
+        for name in ("candidate_status.csv", "candidate_metadata.csv"):
+            with (self.root / "baseline" / name).open() as handle:
+                self.assertEqual([int(r["incident_id"]) for r in csv.DictReader(handle)], sorted(ids))
+        diagnostics = json.loads((self.root / "baseline/diagnostics.json").read_text())
+        self.assertEqual([d["incident_id"] for d in diagnostics], sorted(ids))
+        uploaded = [op.path_in_repo for c in self.api.create_commit.call_args_list for op in c.kwargs["operations"]]
+        self.assertEqual(len(uploaded), 6)
+        self.assertEqual(self.api.create_commit.call_count, 3)
+
+    def test_upload_failure_marks_incidents_failed(self):
+        patches, _ = self._fake_process({1: 0, 2: 0}, upload_fail=True)
+        with patches[0], patches[1], patches[2], self.assertLogs(p.LOG, level="ERROR"):
+            summary = p.run_variant(
+                self.api, self.args, {"incident_ids": [1, 2], "raw_revision": "sha"},
+                self.files, self.root, "baseline", p.Settings(),
+            )
+        self.assertEqual(summary["n_failed"], 2)
+        self.assertEqual(summary["n_candidates"], 0)
+        with (self.root / "baseline/candidate_metadata.csv").open() as handle:
+            self.assertEqual(list(csv.DictReader(handle)), [])
+        with (self.root / "baseline/candidate_status.csv").open() as handle:
+            self.assertTrue(all("hub down" in r["error"] for r in csv.DictReader(handle)))
 
     def test_failures_are_reported_not_counted_as_success(self):
         with patch.object(p, "fetch_paths", side_effect=OSError("test read error")), self.assertLogs(p.LOG, level="ERROR"):

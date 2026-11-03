@@ -8,12 +8,13 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
 import numpy as np
 import rasterio
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 from rasterio.transform import xy
 from rasterio.warp import (
     Resampling,
@@ -37,6 +38,7 @@ META_FIELDS = [
     "incident_id", "candidate_id", "area_m2", "elongation", "severity", "score",
     "lon_min", "lat_min", "lon_max", "lat_max",
 ]
+UPLOAD_BATCH_FILES = 100
 PACKAGES = ("numpy", "scipy", "rasterio", "scikit-image", "huggingface_hub")
 
 
@@ -489,32 +491,76 @@ def run_variant(api, args, study, files, local_study, name, settings):
         path_or_fileobj=str(folder / "run.json"), path_in_repo=f"{remote}/run.json",
         commit_message=f"Start ablation {name}",
     )
-    records, metadata, diagnostics = [], [], []
-    for incident_id in study["incident_ids"]:
-        record = {"incident_id": incident_id, "status": "ok", "n_candidates": 0, "error": ""}
+    def process(incident_id):
+        paths = fetch_paths(args.repo, study["raw_revision"], incident_id, files, api.token)
+        result = detect(paths, variant, settings)
+        incident_folder = folder / f"incident_{incident_id}"
+        incident_folder.mkdir()
+        rows = export_candidates(incident_id, paths, result, incident_folder, settings)
+        diagnostic = {
+            "incident_id": incident_id, "n_tests": result["n_tests"],
+            "z_crit": result["z_crit"], "mask_pixels": int(np.count_nonzero(result["mask"])),
+        }
+        return rows, diagnostic, incident_folder
+
+    records, rows_by_id, diagnostics = {}, {}, {}
+    pending_ops, pending_ids = [], []
+
+    def flush():
+        if not pending_ops:
+            return
         try:
-            paths = fetch_paths(args.repo, study["raw_revision"], incident_id, files, api.token)
-            result = detect(paths, variant, settings)
-            incident_folder = folder / f"incident_{incident_id}"
-            incident_folder.mkdir()
-            rows = export_candidates(incident_id, paths, result, incident_folder, settings)
-            record["n_candidates"] = len(rows)
-            diagnostics.append({
-                "incident_id": incident_id, "n_tests": result["n_tests"],
-                "z_crit": result["z_crit"], "mask_pixels": int(np.count_nonzero(result["mask"])),
-            })
-            if rows:
-                api.upload_folder(
-                    repo_id=args.output_repo, repo_type="dataset", revision=args.output_revision,
-                    folder_path=str(incident_folder), path_in_repo=f"{remote}/incident_{incident_id}",
-                    commit_message=f"Ablation {name}: incident {incident_id}",
-                )
-            metadata.extend(rows)
-            LOG.info("%s incident_%s: %s candidates", name, incident_id, len(rows))
+            api.create_commit(
+                repo_id=args.output_repo, repo_type="dataset", revision=args.output_revision,
+                operations=list(pending_ops),
+                commit_message=f"Ablation {name}: chips for {len(pending_ids)} incident(s)",
+            )
         except Exception as exc:
-            LOG.exception("%s incident_%s failed", name, incident_id)
-            record.update(status="failed", error=f"{type(exc).__name__}: {exc}")
-        records.append(record)
+            LOG.exception("%s upload failed for incidents %s", name, pending_ids)
+            for incident_id in pending_ids:
+                records[incident_id].update(status="failed", error=f"Upload {type(exc).__name__}: {exc}")
+                rows_by_id.pop(incident_id, None)
+        pending_ops.clear()
+        pending_ids.clear()
+
+    # Workers only compute and write local files; Hub commits stay on this thread.
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(process, i): i for i in study["incident_ids"]}
+        for future in as_completed(futures):
+            incident_id = futures[future]
+            record = {"incident_id": incident_id, "status": "ok", "n_candidates": 0, "error": ""}
+            records[incident_id] = record
+            try:
+                rows, diagnostic, incident_folder = future.result()
+            except Exception as exc:
+                LOG.error(
+                    "%s incident_%s failed", name, incident_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                record.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+                continue
+            record["n_candidates"] = len(rows)
+            rows_by_id[incident_id] = rows
+            diagnostics[incident_id] = diagnostic
+            LOG.info("%s incident_%s: %s candidates", name, incident_id, len(rows))
+            if rows:
+                prefix = f"{remote}/incident_{incident_id}"
+                pending_ops.extend(
+                    CommitOperationAdd(
+                        path_in_repo=f"{prefix}/{path.relative_to(incident_folder).as_posix()}",
+                        path_or_fileobj=str(path),
+                    )
+                    for path in sorted(incident_folder.rglob("*.tif"))
+                )
+                pending_ids.append(incident_id)
+                if len(pending_ops) >= UPLOAD_BATCH_FILES:
+                    flush()
+        flush()
+
+    order = sorted(records)
+    records = [records[i] for i in order]
+    metadata = [row for i in order for row in rows_by_id.get(i, [])]
+    diagnostics = [diagnostics[i] for i in order if i in diagnostics]
     write_csv(folder / "candidate_status.csv", STATUS_FIELDS, records)
     write_csv(folder / "candidate_metadata.csv", META_FIELDS, metadata)
     write_json(folder / "diagnostics.json", diagnostics)
@@ -550,11 +596,14 @@ def main(preset=None):
         help="START-th to END-th complete incident sorted by ID (1-based, inclusive)",
     )
     parser.add_argument("--limit", type=int, help="First N complete incidents, sorted by ID")
+    parser.add_argument("--workers", type=int, default=4, help="Incidents processed concurrently")
     if preset is None:
         parser.add_argument("--variant", choices=[*VARIANTS, "all"], default="all")
     args = parser.parse_args()
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
     if args.range and not 1 <= args.range[0] <= args.range[1]:
         parser.error("--range needs 1 <= START <= END")
     args.output_repo = args.output_repo or args.repo
