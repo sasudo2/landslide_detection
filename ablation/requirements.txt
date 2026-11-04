@@ -1,5 +1,0 @@
-numpy
-scipy
-rasterio
-scikit-image>=0.19,<2
-huggingface_hub
