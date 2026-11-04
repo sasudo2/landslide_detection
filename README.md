@@ -91,7 +91,7 @@ Current behavior highlights:
 
 ## Candidate-detection ablation study
 
-The study runs as eight self-contained Kaggle notebooks. They contain their own pipeline code and do not import repository modules or require a runtime `.py` file.
+The study runs as seven self-contained Kaggle notebooks: six independent run notebooks and one optional comparison notebook. Each run notebook contains its own pipeline code and configuration. No notebook imports repository modules, executes another notebook, or depends on a shared generated artifact.
 
 | Notebook | Role |
 |---|---|
@@ -101,12 +101,9 @@ The study runs as eight self-contained Kaggle notebooks. They contain their own 
 | `ablation_no_slope.ipynb` | No slope mask and no slope segmentation feature |
 | `ablation_no_slic.ipynb` | No SLIC; pixelwise evidence and significance gate |
 | `ablation_no_bonferroni.ipynb` | Uncorrected `alpha=0.05`; same normal-approximation gate |
-| `ablation_compare.ipynb` | Read-only validation, then writes `comparison.csv` |
-| `ablation_generate_notebooks.ipynb` | Sole editable source for the six run notebooks |
+| `ablation_compare.ipynb` | Optional read-only validation, then writes `comparison.csv` |
 
-The six run notebooks are generated files. Edit `SHARED_CONFIG` or `VARIANTS` in
-`ablation_generate_notebooks.ipynb`, run it, and commit the regenerated notebooks. Do not hand-edit
-a generated run notebook.
+Each run notebook is independently controlled. Open the notebook, edit its configuration cell, and run it. The six run notebooks do not read each other's manifests or require the others to exist. For a comparable ablation, use the same `RAW_COMMIT_SHA` and `STUDY_ROOT` in all six; for unrelated runs, use different study roots.
 
 ### Fixed cohort
 
@@ -123,62 +120,60 @@ at that immutable commit, and verifies that every selected incident has:
 - `sar_post.tif`
 - either `planet_before.tif` or `gee_before.tif`
 
-If any selected incident is incomplete, the notebook fails before computing. The notebooks do not
-enumerate, inspect, or skip production `candidates/` output; existing production candidates are
-irrelevant to this study.
+If any selected incident is incomplete, the notebook fails before computing. The notebooks scope Hub
+listings to the raw input prefix and their own `<STUDY_ROOT>`; they do not enumerate, inspect, or
+skip production `candidates/` output.
 
-### Configure the shared study
+### Configure a run notebook
 
-In `ablation_generate_notebooks.ipynb`, edit `SHARED_CONFIG`:
+Open any `ablation_<variant>.ipynb` and edit its configuration cell directly:
 
 ```python
-SHARED_CONFIG = {
-    "raw_repo": "sasudo2/landslides",
-    "raw_commit_sha": "REPLACE_WITH_40_CHARACTER_RAW_COMMIT_SHA",  # full 40-char SHA, never main
-    "output_repo": "sasudo2/landslides",
-    "output_revision": "main",
-    "study_root": "ablations/study_01",
-    "source_csv_name": "landslides_from_2018_to_2026.csv",
-    "cohort_start": 900,
-    "cohort_stop": 1000,
-    "workers": 4,
-}
+VARIANT_NAME = "baseline"
+ABLATION_SWITCHES = {"modality": "fused", "slope": True, "slic": True, "bonferroni": True}
+
+RAW_REPO = "sasudo2/landslides"
+RAW_COMMIT_SHA = "REPLACE_WITH_40_CHARACTER_RAW_COMMIT_SHA"  # full 40-char SHA, never main
+OUTPUT_REPO = "sasudo2/landslides"
+OUTPUT_REVISION = "main"
+STUDY_ROOT = "ablations/study_01"
+SOURCE_CSV_NAME = "landslides_from_2018_to_2026.csv"
+COHORT_START = 900
+COHORT_STOP = 1000
+WORKERS = 4
 ```
 
-Run the generator to rewrite all six run notebooks. Branches such as `main` are rejected for the raw
-input: all six notebooks must use the same full immutable commit SHA and the same `STUDY_ROOT`.
-To check for drift without rewriting, set `CHECK_ONLY = True` and run the generator; it regenerates
-the notebooks in memory and compares every committed notebook against the canonical output.
-
-The output repository and branch must already exist. Run notebooks scope Hub listings to the raw
-input prefix and their own `<STUDY_ROOT>`; they never enumerate production `candidates/` files.
+At minimum, set `RAW_COMMIT_SHA` and `STUDY_ROOT`. The raw commit must be a full 40-character SHA;
+branches such as `main` are rejected. The output repository and branch must already exist. Keep
+`VARIANT_NAME` and `ABLATION_SWITCHES` aligned with the notebook you are running unless you
+intentionally create a new variant.
 
 Each Kaggle run notebook needs:
 
 1. **Settings -> Internet: On**
 2. The `landslide-reproted` dataset attached, containing `landslides_from_2018_to_2026.csv`
 3. The Kaggle secret `huggingface_token`, with read/write access to `output_repo`
-4. The setup cell executed before processing
+4. The configuration cell edited and the setup cell executed before processing
+5. All cells run in order
 
-The generated notebooks install their own dependencies (`numpy`, `pandas`, `scipy`, `rasterio`,
+The notebooks install their own dependencies (`numpy`, `pandas`, `scipy`, `rasterio`,
 `scikit-image`, `huggingface_hub`). No repository checkout or shared Python module is required.
 
-### Launch the six runs
+### Run independently
 
-Start all six run notebooks independently and in parallel. Each notebook:
+Start any run notebook on its own. They may run sequentially, in parallel, or on different
+schedules. Each notebook:
 
-1. Validates its own variant configuration and fixed cohort.
+1. Validates its own variant name, switches, workers, and fixed cohort.
 2. Resolves the raw commit and verifies all 100 incidents.
-3. Reads sibling `<STUDY_ROOT>/<other-variant>/study.json` manifests when present.
-4. Compares shared identity fields and refuses to run on any conflict.
-5. Refuses to overwrite or resume its own existing variant folder.
+3. Refuses to overwrite its own existing variant folder.
+4. Writes only its own variant folder.
 
-Absent sibling manifests are allowed, so the six notebooks can start together. Each notebook writes
-only one variant folder and never modifies a sibling folder, the study root itself, production
-`candidates/`, or a repository-wide `.gitattributes`.
-
-Hub calls are retried with bounded backoff for transient failures. Per-incident errors and failed
-chip-upload batches are recorded as failures, never silently converted into zero-candidate results.
+There is no cross-notebook preflight: no notebook reads a sibling manifest. Hub calls are retried
+with bounded backoff for transient failures. Per-incident errors and failed chip-upload batches are
+recorded as failures, never silently converted into zero-candidate results. Each notebook never
+modifies a sibling folder, the study root itself, production `candidates/`, or a repository-wide
+`.gitattributes`.
 
 ### Isolated remote output layout
 
@@ -199,14 +194,15 @@ chip-upload batches are recorded as failures, never silently converted into zero
   no_slope/
   no_slic/
   no_bonferroni/
-  comparison.csv               # comparison notebook only
+  comparison.csv               # optional comparison notebook only
 ```
 
-`study.json` is the immutable compatibility contract. It records the schema version, variant
-switches, raw repository and commit SHA, source CSV name and hash, `df.iloc[900:1000]` cohort
-declaration, ordered 100 incident IDs, required raw-input policy, all numerical settings, installed
-package versions, pipeline/template SHA, generated-notebook SHA, timestamp, and run environment.
-`run.json` records execution-level details such as workers, start/finish times, status, and counts.
+`study.json` records this run's variant, switches, raw repository and commit SHA, detection algorithm
+version, source CSV name and hash, `df.iloc[900:1000]` cohort declaration, ordered 100 incident IDs,
+required raw-input policy, numerical settings, installed package versions, creation timestamp, and
+run environment. The current detection algorithm is `ablation-detection-v2`; it excludes nodata
+pixels and, for fused runs, only tests pixels valid in every selected modality. `run.json` records
+execution-level details such as workers, start/finish times, status, and counts.
 
 `candidate_status.csv` has one row for every incident, including zero-candidate and failed
 incidents. `candidate_metadata.csv` is sorted and keeps the notebook-compatible ranking and
@@ -216,44 +212,53 @@ counts.
 
 ### Rerun behavior
 
-If a run is interrupted or fails, do not resume its variant folder. Choose a **new** `STUDY_ROOT`,
-regenerate the six notebooks from the generator, and launch all six again. A variant folder is
-reserved before processing, and an existing folder for the same variant is always refused.
+If a run is interrupted or fails, do not resume its variant folder. Choose a **new** `STUDY_ROOT`
+for that notebook and rerun it. A variant folder is reserved before processing, and an existing
+folder for the same variant is always refused.
 
-### Comparison notebook
+### Optional comparison notebook
 
-Run `ablation_compare.ipynb` only after all six run notebooks have finished. It is read-only until
-every validation succeeds:
+Run `ablation_compare.ipynb` only if you want an aggregate. It is read-only until every validation
+succeeds:
 
-1. All six variant folders exist with the expected files.
+1. All six variant folders exist under the configured `STUDY_ROOT` with the expected files.
 2. The shared study-identity fields are equivalent across all six `study.json` files.
 3. Every variant declares its expected ablation switches.
 4. Every study has the same ordered 100 incident IDs.
 5. Every run is complete and has no failed incidents.
 
 Only then does it write `<STUDY_ROOT>/comparison.csv`, with one row per variant: cohort size,
-successful and failed counts, incidents with candidates, total candidates, candidates per successful
-incident, shared raw commit, pipeline/template SHA, identity-check result, completion status, and
-switches. Set `ALLOW_PARTIAL = True` only when a partial diagnostic report is explicitly wanted;
-otherwise any failed or incomplete run blocks the comparison.
+successful, failed, and unreported counts, incidents with candidates, total candidates, candidates
+per successful incident, shared raw commit, identity-check result, completion status, and switches.
+Set `ALLOW_PARTIAL = True` only when a partial diagnostic report is explicitly wanted; all six
+study manifests must still exist, and the report marks incident records missing from the available
+summary/status artifacts as `n_unreported`. Otherwise any failed or incomplete run blocks the
+comparison.
+
+The comparison reports candidate counts only. It does not measure accuracy, precision, recall, IoU,
+or ground-truth correctness.
 
 ### Controls and interpretation
 
-- These are six one-component-at-a-time runs, not a full factorial study.
+- These are six one-component-at-a-time runs, not a full factorial study. Each run notebook is
+  independent; the optional comparison only aggregates their completed outputs.
 - Baseline carries the `candidate_detection.ipynb` behavior: RGB-first optical IR-MAD, SAR VV/VH
-  IR-MAD, geometric-mean fusion, a 10 m EPSG:4326 grid, slope masking, SLIC segments, segment-level
-  chi-square evidence with a normal-approximation gate, Bonferroni correction, percentile
-  hysteresis, morphology, area/elongation filtering, ranking, and chip export.
+  IR-MAD, geometric-mean fusion, a 10 m EPSG:4326 grid, valid-pixel masking, slope masking, SLIC
+  segments, segment-level chi-square evidence with a normal-approximation gate, Bonferroni
+  correction, percentile hysteresis, morphology, area/elongation filtering, ranking, and chip
+  export.
 - `optical_only` never fits or reads SAR for detection. `sar_only` never reads optical pixel values
   for detection or segmentation; optical rasters are still used for the analysis-grid reference and
-  review chips. `no_slope` removes both the slope mask and the slope segmentation feature. `no_slic`
+  review chips. `no_slope` removes both the slope mask and the slope segmentation feature but still
+  exports the slope review chip. `no_slic`
   replaces segments with pixelwise confidence and significance tests, with Bonferroni over the full
   grid pixel count. `no_bonferroni` retains the same normal-approximation z-test at `alpha=0.05`.
 - Percentiles (99.7/93), slope cutoff (20 degrees), morphology, blob limits, ranking, chip padding,
   and IR-MAD settings retain the notebook defaults.
 - Each selected modality must have more than 100 valid paired pixels. Otherwise the incident is
-  recorded as failed rather than silently falling back to an available modality, so the six cohorts
-  stay comparable. Do not compare a failed incident as a zero detection.
+  recorded as failed rather than silently falling back to an available modality, so runs remain
+  comparable. Fused runs also require more than 100 pixels valid in both modalities. Do not compare
+  a failed incident as a zero detection.
 - These runs report candidate detection counts, not accuracy. Precision, recall, IoU, and scientific
   conclusions require independent ground-truth labels; candidate counts alone do not demonstrate
   detection quality.
