@@ -143,8 +143,8 @@ COHORT_STOP = 1000
 WORKERS = 4
 ```
 
-Choose a new `STUDY_ROOT` before running. `RAW_COMMIT_SHA` accepts a full 40-character SHA,
-branch, or tag and defaults to `main`. Startup resolves it once, prints the immutable SHA, and
+Choose a `STUDY_ROOT` for the study, and reuse it to resume interrupted runs. `RAW_COMMIT_SHA`
+accepts a full 40-character SHA, branch, or tag and defaults to `main`. Startup resolves it once, prints the immutable SHA, and
 uses only that SHA for raw-file listings, downloads, and study metadata. For comparable runs,
 copy the printed SHA into `RAW_COMMIT_SHA` in all six notebooks: using `main` independently
 can select different commits if the repository changes between runs. The comparison notebook
@@ -170,8 +170,9 @@ schedules. Each notebook:
 
 1. Validates its own variant name, switches, workers, and fixed cohort.
 2. Resolves the raw commit and verifies all 100 incidents.
-3. Refuses to overwrite its own existing variant folder.
-4. Writes only its own variant folder.
+3. Restores its own existing incident records and skips incidents with remote candidate chips,
+   plus successful zero-candidate incidents.
+4. Processes missing incidents and updates only its own variant folder.
 
 There is no cross-notebook preflight: no notebook reads a sibling manifest. Hub calls are retried
 with bounded backoff for transient failures. Per-incident errors and failed chip-upload batches are
@@ -191,6 +192,7 @@ modifies a sibling folder, the study root itself, production `candidates/`, or a
     diagnostics.json
     summary.json
     incident_<id>/
+      result.json
       candidate_<n>/
         ... before, after, slope, mask chips ...
   optical_only/
@@ -216,9 +218,27 @@ counts.
 
 ### Rerun behavior
 
-If a run is interrupted or fails, do not resume its variant folder. Choose a **new** `STUDY_ROOT`
-for that notebook and rerun it. A variant folder is reserved before processing, and an existing
-folder for the same variant is always refused.
+If a run is interrupted or fails, rerun the notebook with the same `STUDY_ROOT` and study
+configuration. Existing candidate incidents are skipped without downloading raw rasters or
+recomputing detection. Successful zero-candidate records are also reused; failed incidents without
+remote candidate chips are retried. Other variants and production outputs are not used to decide
+what to skip.
+
+The notebook preserves existing candidate metadata, diagnostics, and counts in the merged summary.
+New runs upload an incident `result.json` checkpoint in the same commit as its chips, including
+checkpoints for zero detections, so an interruption before the final summary does not lose
+accounting. Do not run two copies of the same variant concurrently.
+
+When resuming from an existing `study.json`, a branch/tag configuration reuses that study's original
+raw commit, even if the branch has advanced. An explicitly configured different SHA or incompatible
+study settings are rejected instead of mixing different experiments. Use a new study root for a
+different experiment.
+
+Legacy remote chips without metadata, incomplete chip sets, or an unverifiable study identity are
+preserved and skipped with a warning. Missing metadata is not invented: `summary.json` marks
+`metadata_complete=false`, lists `incomplete_incident_ids`, and reports the run as incomplete while
+continuing to process missing incidents. Strict comparison rejects these incomplete runs; partial
+comparison can report their known counts.
 
 ### Optional comparison notebook
 

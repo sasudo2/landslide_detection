@@ -119,7 +119,9 @@ class AblationRevisionTests(unittest.TestCase):
             with self.subTest(notebook=path.name):
                 tree = notebook_code(path)
                 downloads = [
-                    node for node in ast.walk(tree)
+                    node for function in tree.body
+                    if isinstance(function, ast.FunctionDef) and function.name == "fetch_paths"
+                    for node in ast.walk(function)
                     if isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name)
                     and node.func.id == "hf_hub_download"
