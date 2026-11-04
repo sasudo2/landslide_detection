@@ -175,8 +175,9 @@ schedules. Each notebook:
 4. Processes missing incidents and updates only its own variant folder.
 
 There is no cross-notebook preflight: no notebook reads a sibling manifest. Hub calls are retried
-with bounded backoff for transient failures. Per-incident errors and failed chip-upload batches are
-recorded as failures, never silently converted into zero-candidate results. Each notebook never
+with bounded backoff for transient failures. Per-incident errors are recorded as failures, never
+silently converted into zero-candidate results. A failed final commit raises and retains staged
+outputs locally for recovery. Each notebook never
 modifies a sibling folder, the study root itself, production `candidates/`, or a repository-wide
 `.gitattributes`.
 
@@ -225,9 +226,18 @@ remote candidate chips are retried. Other variants and production outputs are no
 what to skip.
 
 The notebook preserves existing candidate metadata, diagnostics, and counts in the merged summary.
-New runs upload an incident `result.json` checkpoint in the same commit as its chips, including
-checkpoints for zero detections, so an interruption before the final summary does not lose
-accounting. Do not run two copies of the same variant concurrently.
+All new candidates, incident `result.json` checkpoints (including zero detections), study metadata,
+and summaries accumulate locally and are published together in one final commit. There is no
+reservation commit or intermediate batch upload. An interruption before publication leaves new
+incidents unpublished; rerunning skips previously published incidents and recomputes missing ones.
+Do not run two copies of the same variant concurrently.
+
+Each incident downloads raw imagery into its own private cache under this run's temporary working
+directory. Those raw downloads are deleted immediately after chip export, or when download,
+detection, or export fails. Remote raw imagery and shared Hugging Face caches are never deleted.
+Candidate chips remain staged until the final commit, so provision enough disk space for all new
+candidates. A final-commit failure preserves staged chips and summaries and reports their local
+path; the notebook does not publish a success-shaped fallback or discard the files.
 
 When resuming from an existing `study.json`, a branch/tag configuration reuses that study's original
 raw commit, even if the branch has advanced. An explicitly configured different SHA or incompatible

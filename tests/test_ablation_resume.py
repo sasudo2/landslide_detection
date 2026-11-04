@@ -156,6 +156,8 @@ class AblationResumeTests(unittest.TestCase):
                 self.assertEqual(namespace["remaining_ids"], ids[1:])
                 self.assertEqual(namespace["study"], previous)
                 self.assertEqual(namespace["RUN"]["n_resumed"], 1)
+                api.create_commit.assert_not_called()
+                self.assertEqual(namespace["LOCAL_RAW_ROOT"], namespace["LOCAL_ROOT"] / "raw_downloads")
                 local_root = namespace["LOCAL_ROOT"]
                 shutil.rmtree(local_root)
 
@@ -260,6 +262,12 @@ class AblationResumeTests(unittest.TestCase):
                     return kwargs
 
                 def commit(**kwargs):
+                    self.assertEqual(
+                        {call.args[0] for call in fetch.call_args_list},
+                        set() if mode == "all_done" else {2, 3},
+                    )
+                    self.assertTrue((namespace["LOCAL_VARIANT"] / "summary.json").is_file())
+                    self.assertFalse(any(namespace["LOCAL_RAW_ROOT"].glob("incident_*")))
                     commits.append({
                         op["path_in_repo"]: Path(op["path_or_fileobj"]).read_bytes()
                         for op in kwargs["operations"]
@@ -268,7 +276,13 @@ class AblationResumeTests(unittest.TestCase):
                 api.create_commit.side_effect = commit
                 if mode == "upload_failure":
                     api.create_commit.side_effect = RuntimeError("upload unavailable")
-                fetch = Mock(side_effect=lambda incident_id, before: incident_id)
+                def fetch_raw(incident_id, before):
+                    raw = namespace["LOCAL_RAW_ROOT"] / f"incident_{incident_id}"
+                    raw.mkdir(parents=True)
+                    (raw / "raw.tif").write_bytes(b"raw")
+                    return incident_id
+
+                fetch = Mock(side_effect=fetch_raw)
                 coverage_tree = ast.parse(sources(notebook)[5])
                 coverage_class = [
                     node for node in coverage_tree.body
@@ -288,6 +302,9 @@ class AblationResumeTests(unittest.TestCase):
                     return {"n_tests": 10, "z_crit": 2, "mask": []}
 
                 def export(incident_id, paths, result, folder):
+                    self.assertTrue(
+                        (namespace["LOCAL_RAW_ROOT"] / f"incident_{incident_id}" / "raw.tif").is_file()
+                    )
                     if incident_id == 3:
                         return []
                     candidate = folder / "candidate_1"
@@ -305,12 +322,14 @@ class AblationResumeTests(unittest.TestCase):
                     resumed[3] = {"incident_id": 3, "status": "ok", "n_candidates": 0, "error": ""}
                     resumed_rows[2] = [{"incident_id": 2, "candidate_id": 1}]
                 namespace.update({
-                    "LOCAL_VARIANT": Path(directory), "resume_records": resumed,
+                    "LOCAL_VARIANT": Path(directory) / "staged",
+                    "LOCAL_RAW_ROOT": Path(directory) / "raw_downloads",
+                    "resume_records": resumed,
                     "resume_rows": resumed_rows,
                     "resume_diagnostics": {1: {"incident_id": 1, "n_candidates": 1}},
                     "incomplete_incidents": {1} if mode == "legacy_incomplete" else set(),
                     "remaining_ids": [] if mode == "all_done" else [2, 3],
-                    "incident_ids": [1, 2, 3], "WORKERS": 2, "UPLOAD_BATCH_FILES": 100,
+                    "incident_ids": [1, 2, 3], "WORKERS": 2,
                     "VARIANT_NAME": "optical_only", "ABLATION_SWITCHES": {},
                     "study_root": "ablations/study_01", "OUTPUT_REPO": "owner/output",
                     "OUTPUT_REVISION": "main", "API": api, "CommitOperationAdd": operation,
@@ -327,9 +346,11 @@ class AblationResumeTests(unittest.TestCase):
                     "utc_now": lambda: "2026-11-04",
                 })
                 output = io.StringIO()
+                namespace["LOCAL_VARIANT"].mkdir()
+                namespace["write_json"](namespace["LOCAL_VARIANT"] / "study.json", namespace["study"])
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
                     if mode == "upload_failure":
-                        with self.assertRaisesRegex(RuntimeError, "2 incident"):
+                        with self.assertRaisesRegex(RuntimeError, "Final commit failed") as raised:
                             exec(compile(sources(notebook)[8], str(notebook), "exec"), namespace)
                     elif mode == "processing_failure":
                         with self.assertRaisesRegex(RuntimeError, "Unexpected numerical error"):
@@ -337,6 +358,7 @@ class AblationResumeTests(unittest.TestCase):
                     else:
                         exec(compile(sources(notebook)[8], str(notebook), "exec"), namespace)
                 if mode in ("insufficient_coverage", "processing_failure"):
+                    self.assertFalse(any(namespace["LOCAL_RAW_ROOT"].glob("incident_*")))
                     self.assertEqual(namespace["records"][3]["status"], "failed")
                     self.assertEqual(namespace["summary"]["n_ok"], 2)
                     self.assertEqual(namespace["summary"]["n_failed"], 1)
@@ -344,7 +366,8 @@ class AblationResumeTests(unittest.TestCase):
                     self.assertFalse(namespace["summary"]["complete"])
                     self.assertEqual(namespace["records"][1]["status"], "ok")
                     self.assertEqual(namespace["records"][2]["status"], "ok")
-                    api.upload_folder.assert_called_once()
+                    api.create_commit.assert_called_once()
+                    api.upload_folder.assert_not_called()
                     if mode == "insufficient_coverage":
                         self.assertEqual(namespace["RUN"]["status"], "incomplete")
                         self.assertEqual(namespace["summary"]["insufficient_coverage_incident_ids"], [3])
@@ -353,12 +376,14 @@ class AblationResumeTests(unittest.TestCase):
                     continue
                 if mode == "upload_failure":
                     self.assertEqual(namespace["records"][1]["status"], "ok")
-                    self.assertEqual(namespace["records"][2]["status"], "failed")
-                    self.assertEqual(namespace["records"][3]["status"], "failed")
-                    self.assertEqual(namespace["summary"]["n_candidates"], 1)
-                    self.assertEqual(namespace["metadata_rows"],
-                                     [{"incident_id": 1, "candidate_id": 1}])
-                    self.assertFalse(namespace["summary"]["complete"])
+                    self.assertEqual(namespace["records"][2]["status"], "ok")
+                    self.assertEqual(namespace["records"][3]["status"], "ok")
+                    self.assertEqual(namespace["summary"]["n_candidates"], 2)
+                    self.assertTrue((namespace["LOCAL_VARIANT"] / "incident_2" / "result.json").is_file())
+                    self.assertTrue((namespace["LOCAL_VARIANT"] / "summary.json").is_file())
+                    self.assertIn(str(namespace["LOCAL_VARIANT"]), str(raised.exception))
+                    self.assertIn("retained", str(raised.exception))
+                    api.upload_folder.assert_not_called()
                     continue
                 self.assertEqual({call.args[0] for call in fetch.call_args_list},
                                  set() if mode == "all_done" else {2, 3})
@@ -369,7 +394,14 @@ class AblationResumeTests(unittest.TestCase):
                 expected_paths = chip_files(2) | {
                     PREFIX + "incident_2/result.json", PREFIX + "incident_3/result.json",
                 }
-                self.assertEqual(checkpoint_paths, set() if mode == "all_done" else expected_paths)
+                summaries = {PREFIX + name for name in (
+                    "study.json", "run.json", "summary.json", "candidate_status.csv",
+                    "candidate_metadata.csv", "diagnostics.json",
+                )}
+                self.assertEqual(checkpoint_paths,
+                                 summaries if mode == "all_done" else expected_paths | summaries)
+                api.create_commit.assert_called_once()
+                api.upload_folder.assert_not_called()
                 self.assertEqual(namespace["metadata_rows"],
                                  [{"incident_id": 1, "candidate_id": 1},
                                   {"incident_id": 2, "candidate_id": 1}])
