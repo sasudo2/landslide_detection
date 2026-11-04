@@ -111,8 +111,8 @@ Every run notebook reads the attached `landslide-reproted` dataset file
 `landslides_from_2018_to_2026.csv`, selects exactly `df.iloc[900:1000]`, preserves the CSV row
 order, and uses its `id` column as the 100 incident IDs.
 
-Before any computation, each notebook resolves the configured raw commit SHA, lists the raw files
-at that immutable commit, and verifies that every selected incident has:
+Before any computation, each notebook resolves the configured raw revision to a commit SHA, lists
+the raw files at that immutable commit, and verifies that every selected incident has:
 
 - `after.tif`
 - `slope.tif`
@@ -133,7 +133,7 @@ VARIANT_NAME = "baseline"
 ABLATION_SWITCHES = {"modality": "fused", "slope": True, "slic": True, "bonferroni": True}
 
 RAW_REPO = "sasudo2/landslides"
-RAW_COMMIT_SHA = "REPLACE_WITH_40_CHARACTER_RAW_COMMIT_SHA"  # full 40-char SHA, never main
+RAW_COMMIT_SHA = "main"  # resolved once to an immutable SHA at startup
 OUTPUT_REPO = "sasudo2/landslides"
 OUTPUT_REVISION = "main"
 STUDY_ROOT = "ablations/study_01"
@@ -143,10 +143,14 @@ COHORT_STOP = 1000
 WORKERS = 4
 ```
 
-At minimum, set `RAW_COMMIT_SHA` and `STUDY_ROOT`. The raw commit must be a full 40-character SHA;
-branches such as `main` are rejected. The output repository and branch must already exist. Keep
-`VARIANT_NAME` and `ABLATION_SWITCHES` aligned with the notebook you are running unless you
-intentionally create a new variant.
+Choose a new `STUDY_ROOT` before running. `RAW_COMMIT_SHA` accepts a full 40-character SHA,
+branch, or tag and defaults to `main`. Startup resolves it once, prints the immutable SHA, and
+uses only that SHA for raw-file listings, downloads, and study metadata. For comparable runs,
+copy the printed SHA into `RAW_COMMIT_SHA` in all six notebooks: using `main` independently
+can select different commits if the repository changes between runs. The comparison notebook
+still rejects different resolved raw commits. The output repository and branch must already
+exist. Keep `VARIANT_NAME` and `ABLATION_SWITCHES` aligned with the notebook you are running
+unless you intentionally create a new variant.
 
 Each Kaggle run notebook needs:
 
