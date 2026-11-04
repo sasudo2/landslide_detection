@@ -283,6 +283,12 @@ or ground-truth correctness.
   recorded as failed rather than silently falling back to an available modality, so runs remain
   comparable. Fused runs also require more than 100 pixels valid in both modalities. Do not compare
   a failed incident as a zero detection.
+  Insufficient coverage does not abort the notebook: successful outputs and failure details are
+  saved, the notebook prints an explicit warning with incident IDs and valid-pixel counts, and the
+  study remains incomplete. Summary/run records include `insufficient_coverage_incident_ids`.
+  Strict comparison still rejects the incomplete study; other processing or upload errors still
+  raise after accounting is saved. Reruns retry coverage failures without recomputing successes;
+  unchanged raw data may continue to have insufficient coverage.
 - These runs report candidate detection counts, not accuracy. Precision, recall, IoU, and scientific
   conclusions require independent ground-truth labels; candidate counts alone do not demonstrate
   detection quality.

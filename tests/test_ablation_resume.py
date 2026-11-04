@@ -43,6 +43,38 @@ def chip_files(incident_id, candidate_id=1):
 
 
 class AblationResumeTests(unittest.TestCase):
+    def test_exact_coverage_threshold_reports_modality_without_fitting_sparse_data(self):
+        import numpy as np
+
+        for notebook in RUN_NOTEBOOKS:
+            tree = ast.parse(sources(notebook)[5])
+            nodes = [
+                node for node in tree.body
+                if (isinstance(node, ast.ClassDef) and node.name == "InsufficientCoverageError")
+                or (isinstance(node, ast.FunctionDef) and node.name == "change_evidence")
+            ]
+            for optical in (True, False):
+                for n_valid in (0, 100, 101):
+                    with self.subTest(notebook=notebook.name, optical=optical, n_valid=n_valid):
+                        fit = Mock(return_value=(np.ones(n_valid), np.ones(n_valid)))
+                        namespace = {"np": np, "irmad": fit}
+                        exec(compile(ast.Module(body=nodes, type_ignores=[]),
+                                     str(notebook), "exec"), namespace)
+                        data = np.zeros((2, 1, 150))
+                        data[:, :, :n_valid] = 1.0 if optical else -10.0
+                        if n_valid <= 100:
+                            modality = "Optical" if optical else "SAR"
+                            with self.assertRaisesRegex(
+                                namespace["InsufficientCoverageError"],
+                                f"{modality} has {n_valid} valid paired pixels",
+                            ):
+                                namespace["change_evidence"](data, data, optical)
+                            fit.assert_not_called()
+                        else:
+                            _, _, _, valid = namespace["change_evidence"](data, data, optical)
+                            self.assertEqual(int(valid.sum()), 101)
+                            fit.assert_called_once()
+
     def test_partial_comparison_accepts_explicitly_incomplete_legacy_accounting(self):
         root = RUN_NOTEBOOKS[0].parent
         tree = ast.parse(sources(root / "ablation_compare.ipynb")[3])
@@ -216,7 +248,8 @@ class AblationResumeTests(unittest.TestCase):
     def test_processing_cell_only_runs_missing_ids_and_checkpoints_zero_detections(self):
         for notebook, mode in (
             (notebook, mode) for notebook in RUN_NOTEBOOKS
-            for mode in ("mixed", "all_done", "legacy_incomplete", "upload_failure")
+            for mode in ("mixed", "all_done", "legacy_incomplete", "upload_failure",
+                         "insufficient_coverage", "processing_failure")
         ):
             with self.subTest(notebook=notebook.name, mode=mode), tempfile.TemporaryDirectory() as directory:
                 namespace = helpers(notebook)
@@ -236,6 +269,23 @@ class AblationResumeTests(unittest.TestCase):
                 if mode == "upload_failure":
                     api.create_commit.side_effect = RuntimeError("upload unavailable")
                 fetch = Mock(side_effect=lambda incident_id, before: incident_id)
+                coverage_tree = ast.parse(sources(notebook)[5])
+                coverage_class = [
+                    node for node in coverage_tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == "InsufficientCoverageError"
+                ]
+                if coverage_class:
+                    exec(compile(ast.Module(body=coverage_class, type_ignores=[]),
+                                 str(notebook), "exec"), namespace)
+
+                def detect(incident_id):
+                    if incident_id == 3 and mode == "insufficient_coverage":
+                        raise namespace["InsufficientCoverageError"](
+                            "SAR has 42 valid paired pixels; IR-MAD requires more than 100"
+                        )
+                    if incident_id == 3 and mode == "processing_failure":
+                        raise ValueError("Unexpected numerical error")
+                    return {"n_tests": 10, "z_crit": 2, "mask": []}
 
                 def export(incident_id, paths, result, folder):
                     if incident_id == 3:
@@ -268,7 +318,7 @@ class AblationResumeTests(unittest.TestCase):
                     "ThreadPoolExecutor": ThreadPoolExecutor, "as_completed": as_completed,
                     "traceback": traceback, "before_by_incident": {},
                     "fetch_paths": fetch,
-                    "detect": lambda paths: {"n_tests": 10, "z_crit": 2, "mask": []},
+                    "detect": detect,
                     "export_candidates": export,
                     "np": type("NP", (), {"count_nonzero": staticmethod(lambda mask: 0)}),
                     "STATUS_FIELDS": ["incident_id", "status", "n_candidates", "error"],
@@ -276,12 +326,31 @@ class AblationResumeTests(unittest.TestCase):
                     "study": {"raw_commit_sha": "a" * 40}, "RUN": {},
                     "utc_now": lambda: "2026-11-04",
                 })
-                with contextlib.redirect_stdout(io.StringIO()):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
                     if mode == "upload_failure":
                         with self.assertRaisesRegex(RuntimeError, "2 incident"):
                             exec(compile(sources(notebook)[8], str(notebook), "exec"), namespace)
+                    elif mode == "processing_failure":
+                        with self.assertRaisesRegex(RuntimeError, "Unexpected numerical error"):
+                            exec(compile(sources(notebook)[8], str(notebook), "exec"), namespace)
                     else:
                         exec(compile(sources(notebook)[8], str(notebook), "exec"), namespace)
+                if mode in ("insufficient_coverage", "processing_failure"):
+                    self.assertEqual(namespace["records"][3]["status"], "failed")
+                    self.assertEqual(namespace["summary"]["n_ok"], 2)
+                    self.assertEqual(namespace["summary"]["n_failed"], 1)
+                    self.assertEqual(namespace["summary"]["n_candidates"], 2)
+                    self.assertFalse(namespace["summary"]["complete"])
+                    self.assertEqual(namespace["records"][1]["status"], "ok")
+                    self.assertEqual(namespace["records"][2]["status"], "ok")
+                    api.upload_folder.assert_called_once()
+                    if mode == "insufficient_coverage":
+                        self.assertEqual(namespace["RUN"]["status"], "incomplete")
+                        self.assertEqual(namespace["summary"]["insufficient_coverage_incident_ids"], [3])
+                        self.assertIn("WARNING: study incomplete", output.getvalue())
+                        self.assertIn("SAR has 42 valid paired pixels", output.getvalue())
+                    continue
                 if mode == "upload_failure":
                     self.assertEqual(namespace["records"][1]["status"], "ok")
                     self.assertEqual(namespace["records"][2]["status"], "failed")
