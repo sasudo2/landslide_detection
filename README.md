@@ -217,6 +217,66 @@ bounding-box columns. `diagnostics.json` records per-incident test counts, criti
 mask pixels, and candidate counts. `summary.json` records successful/failed counts and candidate
 counts.
 
+### Download one ablation variant locally
+
+Use `download_ablation_candidates.sh` independently of the production downloader:
+
+```bash
+# Requires Python 3 and huggingface_hub; use HF_TOKEN or an existing HF login.
+./download_ablation_candidates.sh optical_only
+./download_ablation_candidates.sh no_slic 1 10 --outdir ./review/no_slic
+./download_ablation_candidates.sh baseline --study-root ablations/study_02 --revision main
+./download_ablation_candidates.sh --help
+```
+
+The required variant is one of `baseline`, `optical_only`, `sar_only`, `no_slope`, `no_slic`,
+or `no_bonferroni`. Optional start/end indices are 1-based, inclusive positions among numerically
+sorted incidents **with candidate TIFFs**, not incident IDs. A single index selects one incident.
+The default destination is `./ablation_candidates/<study-root>/<variant>/`; `--outdir` selects
+an exact destination (use separate destinations for different studies/variants).
+`--repo` overrides the default dataset repository `sasudo2/landslides`.
+
+The script pins the requested revision once, lists only the selected variant, and downloads
+its selected incident folders (chips and checkpoints), plus the available run-level manifests,
+CSVs, diagnostics, and summary. The remote study/variant prefix is stripped locally, leaving
+`incident_<id>/candidate_<n>/...`. Run-level metadata still describes the full variant when
+downloading a subset. Variants with no candidates can still download their run metadata.
+Selected files are fetched directly with up to four concurrent downloads, avoiding a
+repository-wide snapshot scan and per-file glob filtering. File progress is printed as
+downloads are copied into the destination.
+Hugging Face cache reuse and bounded transient retries support reruns; missing local files are
+restored, changed files are refreshed, and identical files are not recopied. No external
+download log suppresses restoration. Other variants, production candidates, and raw imagery
+are not downloaded.
+
+### Remove repeating candidate folders before annotation
+
+`deduplicate_candidates.py` applies spatial overlap filtering to one local folder containing
+`incident_*/candidate_*` directories. It requires `rasterio`.
+
+```bash
+# Preview duplicates and write candidate_dedup_report.csv without deleting anything.
+python3 deduplicate_candidates.py ./review/no_slic
+
+# Permanently delete duplicate candidate folders.
+python3 deduplicate_candidates.py ./review/no_slic --delete
+```
+
+The script transforms each after raster's actual bounds to WGS84 and compares those boxes
+at their original geographic locations and sizes, keeping the first candidate in numeric incident/candidate order when IoU is
+at least 0.50. It compares across all incidents; labels and event dates are not considered.
+`--iou` and `--report` override the defaults. Like the annotation notebook,
+this is greedy spatial filtering, not proof that two candidates depict the same event.
+Unlike the annotation notebook, boxes are not normalized to 1,000 m. No boxes or raster chips
+are cropped, resized, or rewritten. All candidates are scanned successfully and a report is written
+before deletion starts; failures are explicit, and already-completed deletions cannot be undone.
+The CSV maps each proposed duplicate to its retained candidate and overlap score.
+
+Use an annotation-only copy: study CSVs, checkpoints, summaries, and existing annotations are
+left unchanged and will no longer describe the reduced folder contents. Remote data is never
+modified. Downloading again can restore deleted candidates. Do not combine variants into one
+folder or run downloads/annotation concurrently with deletion.
+
 ### Rerun behavior
 
 If a run is interrupted or fails, rerun the notebook with the same `STUDY_ROOT` and study
@@ -256,18 +316,30 @@ Run `ablation_compare.ipynb` only if you want an aggregate. It is read-only unti
 succeeds:
 
 1. All six variant folders exist under the configured `STUDY_ROOT` with the expected files.
-2. The shared study-identity fields are equivalent across all six `study.json` files.
+2. The shared study-identity fields are equivalent across all six `study.json` files. Different
+   raw commit SHAs are accepted only if Hub blob IDs match for all 500 selected raw inputs.
 3. Every variant declares its expected ablation switches.
 4. Every study has the same ordered 100 incident IDs.
-5. Every run is complete and has no failed incidents.
+5. In strict mode (`ALLOW_PARTIAL = False`), every run is complete and has no failed incidents.
 
 Only then does it write `<STUDY_ROOT>/comparison.csv`, with one row per variant: cohort size,
 successful, failed, and unreported counts, incidents with candidates, total candidates, candidates
 per successful incident, shared raw commit, identity-check result, completion status, and switches.
-Set `ALLOW_PARTIAL = True` only when a partial diagnostic report is explicitly wanted; all six
-study manifests must still exist, and the report marks incident records missing from the available
-summary/status artifacts as `n_unreported`. Otherwise any failed or incomplete run blocks the
-comparison.
+`ALLOW_PARTIAL = True` is the default, allowing diagnostic reports for runs with coverage failures
+or incomplete legacy outputs. All six matching study manifests must still exist; conflicting
+identities and malformed accounting still block publication. Incomplete runs emit explicit
+warnings and are marked `run_complete=no`, with `run_status`, `metadata_complete`, failed counts,
+and missing incident records reported as `n_unreported`. Set `ALLOW_PARTIAL = False` to require
+complete runs. Partial totals are not a complete or necessarily comparable ablation result:
+different runs may have different successful subsets.
+
+Publishing outputs to the raw-data repository advances its commit SHA even when raw imagery is
+unchanged. When SHAs differ, comparison queries file metadata at each recorded immutable commit
+(without downloading imagery) and verifies the selected before, after, slope, and two SAR files
+for every cohort incident. The report preserves each original `raw_commit_sha` and records
+`raw_identity_check` as `same_commit` or `identical_input_blobs`. Changed or unverifiable inputs
+still block publication, even in partial mode. If raw inputs really changed, rerun affected variants
+with one explicit `RAW_COMMIT_SHA` in a new `STUDY_ROOT`; do not edit saved manifests to hide differences.
 
 The comparison reports candidate counts only. It does not measure accuracy, precision, recall, IoU,
 or ground-truth correctness.
