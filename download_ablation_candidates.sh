@@ -153,7 +153,7 @@ def download_file(remote):
 
 
 copied = skipped = 0
-with ThreadPoolExecutor(max_workers=4) as executor:
+with ThreadPoolExecutor(max_workers=8) as executor:
     for completed, (remote, source) in enumerate(executor.map(download_file, selected_files), 1):
         destination = outdir / remote[len(prefix):]
         if destination.is_file() and filecmp.cmp(source, destination, shallow=False):

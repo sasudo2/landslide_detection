@@ -76,7 +76,7 @@ from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 #      The HF cache makes each retry resume where it stopped (already-cached files
 #      are not re-requested), so progress is preserved across retries and runs.
 # ---------------------------------------------------------------------------
-SNAPSHOT_WORKERS = 4
+SNAPSHOT_WORKERS = 16
 MAX_RETRIES      = 20
 RETRY_BASE_SEC   = 10
 

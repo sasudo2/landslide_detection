@@ -277,6 +277,54 @@ left unchanged and will no longer describe the reduced folder contents. Remote d
 modified. Downloading again can restore deleted candidates. Do not combine variants into one
 folder or run downloads/annotation concurrently with deletion.
 
+### Final ablation table from annotations
+
+After all six variants are downloaded, deduplicated, and labelled, `analyze_ablation.py` builds
+the final ablation table (standard library only):
+
+```bash
+python3 analyze_ablation.py                                   # ablation_candidates/ablations/study_01
+python3 analyze_ablation.py <study_dir> --outdir <dir> --site-iou 0.25 --bootstrap 5000
+```
+
+Each variant folder needs `candidate_status.csv` and `landslide_identification.csv` (or
+`landslides_identification.csv`). Only incidents with status `ok` in every variant are compared.
+Because labels exist only for candidates kept by `deduplicate_candidates.py`, the same global
+greedy IoU ≥ 0.50 rule is re-applied to every labelled set by using the label bounding boxes. This
+has no effect on variants that were already deduplicated and makes variants that were labelled
+without deduplication comparable. Duplicates take no label from the candidate they duplicate.
+
+There is no exhaustive ground truth, so recall is relative. Landslide-labelled boxes from all
+variants are pooled and merged into sites at IoU ≥ `--site-iou` (default 0.1), and each variant
+is scored on the sites it recovers. The table reports raw/unique candidates, TP, precision,
+relative recall, F1, incidents hit, and candidates reviewed per TP. Each component's contribution
+is reported as baseline minus ablated, with paired sites lost/gained, an exact McNemar p-value,
+and incident-level bootstrap 95% CIs for ΔRecall and ΔF1. Outputs go to
+`<study_dir>/ablation_results/`: `ablation_table.csv`, `ablation_table.md`, and
+`ablation_sites.csv`, which lists every pooled site and the variants that found it.
+
+### Tune detection variables against the pooled sites
+
+`detection_tuning.ipynb` is a self-contained Kaggle notebook that searches the full model's detection
+variables for values that cut false positives while keeping or raising recall. It reuses the
+`ablations/study_01` raw commit (`8b2c2d92…`) and cohort, and embeds the 66 pooled sites from
+`ablation_sites.csv` as ground truth (each site's member detection boxes).
+
+- IR-MAD evidence is computed once per incident with code copied verbatim from
+  `ablation_baseline.ipynb`; baseline parameters reproduce the ablation run's candidates exactly.
+- A multi-objective Optuna search (maximise sites found, minimise false positives) tunes fusion
+  weight, slope threshold, SLIC size/compactness, hysteresis percentiles, alpha, blob filters,
+  candidate cap, a minimum-severity filter, and the ranking score.
+- Candidates are deduplicated like `analyze_ablation.py`; a candidate is a TP when its detection
+  box has IoU ≥ `MATCH_IOU` (default 0.2) with a site member.
+- Incidents are split into tuning and hold-out sets (overlapping incidents stay together); only the
+  hold-out rows of `comparison.csv` show whether the selected values generalise.
+
+Enable internet and run all cells; no token is required for the public raw dataset. Outputs go to
+`/kaggle/working/tuning_results/` (`comparison.csv`, `pareto.csv`, `trials.csv`,
+`recommended_settings.json`, `selected_candidates.csv`). The 66 sites are not exhaustive, so label
+unmatched `selected_candidates.csv` rows before trusting the reported precision.
+
 ### Rerun behavior
 
 If a run is interrupted or fails, rerun the notebook with the same `STUDY_ROOT` and study
