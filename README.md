@@ -114,11 +114,13 @@ Current behavior highlights:
 
 ## Stage 3: Annotation and PNG export
 
+If both Planet and GEE after-images are missing, the exporter reports and skips that landslide without stopping the notebook. Missing-source skips are counted separately from existing cropped TIFFs.
+
 Run the assets in this order:
 1. `notebooks/pipeline/stage_3_annotation_and_png_export/annotation_dedup_build.ipynb` resizes and deduplicates annotated rows, appending new records to the landslide/non-landslide CSVs.
-2. `notebooks/pipeline/stage_3_annotation_and_png_export/landslide_download.ipynb` reads `landslide.csv`, skips candidates whose cropped TIFF already exists under Hugging Face `landslide/`, then crops each remaining raw Planet after-image. It uploads individual TIFFs to `landslide/` and one `landslide_png/landslide_png_yyyymmdd_hhmmss.zip` containing that run's PNGs.
+2. `notebooks/pipeline/stage_3_annotation_and_png_export/landslide_download.ipynb` reads `landslide.csv`, skips candidates whose cropped TIFF already exists under Hugging Face `landslide/`, then crops the raw Planet after-image or falls back to `incident_{ID}_gee_after.tif` if present. It uploads individual TIFFs to `landslide/` and one `landslide_png/landslide_png_yyyymmdd_hhmmss.zip` containing that run's PNGs.
 
-Attach `landslide.csv` as a Kaggle dataset and update `LANDSLIDE_CSV` in the notebook to its mounted path. TIFFs and the ZIP are uploaded in one Hugging Face commit; existing TIFFs are checked before any raw-image downloads. The notebook reads the `huggingface_token` Kaggle secret and does not need a Planet API key.
+Attach `landslide.csv` as a Kaggle dataset and update `LANDSLIDE_CSV` in the notebook to its mounted path. TIFFs and the ZIP are uploaded in one Hugging Face commit; existing TIFFs are checked before any raw-image downloads. The current Stage 1 notebook creates `gee_before.tif`, not `gee_after.tif`, so this fallback works only when a GEE after-image was uploaded separately. The notebook reads the `huggingface_token` Kaggle secret and does not need a Planet API key.
 
 ## Related documentation
 

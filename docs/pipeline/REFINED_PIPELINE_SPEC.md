@@ -75,11 +75,13 @@ Run these in order:
 
 ## Stage 3: Annotation and PNG export
 
+If neither after-image exists for a landslide, log its incident/candidate IDs and skip it without failing the notebook. Report missing-source skips separately from existing-output skips.
+
 Run these in order:
 1. `notebooks/pipeline/stage_3_annotation_and_png_export/annotation_dedup_build.ipynb` to resize/deduplicate annotation rows and append new rows to the labeled CSVs.
-2. `notebooks/pipeline/stage_3_annotation_and_png_export/landslide_download.ipynb` to read `landslide.csv`, check for existing `landslide/incident_{incident}_candidate_{candidate}_after.tif` crops, and skip those rows before downloading any source imagery. For each new row, fetch the raw `incident_{ID}_after.tif` from `raw_images/raw_incidents/`, crop it to the annotation bbox, and produce an individual cropped TIFF plus a PNG.
+2. `notebooks/pipeline/stage_3_annotation_and_png_export/landslide_download.ipynb` to read `landslide.csv`, check for existing `landslide/incident_{incident}_candidate_{candidate}_after.tif` crops, and skip those rows before downloading any source imagery. For each new row, prefer the raw `incident_{ID}_after.tif` from `raw_images/raw_incidents/`; if it is absent, use `incident_{ID}_gee_after.tif` when present. Crop to the annotation bbox and produce an individual cropped TIFF plus a PNG.
 
-Upload each cropped TIFF individually under `landslide/incident_{incident}_candidate_{candidate}_after.tif`. Accumulate all PNGs generated in the current run into one `landslide_png/landslide_png_yyyymmdd_hhmmss.zip`. Commit the TIFF files and the session ZIP together. The notebook consumes only `landslide.csv` from the configured annotation path and requires the Hugging Face write token; it does not submit Planet orders or read an order log.
+Upload each cropped TIFF individually under `landslide/incident_{incident}_candidate_{candidate}_after.tif`. Accumulate all PNGs generated in the current run into one `landslide_png/landslide_png_yyyymmdd_hhmmss.zip`. Commit the TIFF files and the session ZIP together. The notebook consumes only `landslide.csv` from the configured annotation path and requires the Hugging Face write token; it does not submit Planet orders or read an order log. Current Stage 1 emits `gee_before.tif`, not `gee_after.tif`; the fallback requires a GEE after-image to exist on Hugging Face.
 
 ## Naming specification
 
