@@ -114,6 +114,8 @@ Current behavior highlights:
 
 ## Stage 3: Annotation and PNG export
 
+PNG RGB channels follow TIFF color metadata or band descriptions. Without that metadata, the exporter logs its fallback to RGB for 8-bit visual imagery and BGR for analytic imagery. Cropped TIFFs preserve the source color interpretation.
+
 Crop windows extending outside a raw TIFF are shifted inward to its edge without changing their pixel dimensions. Shifts are logged and the output georeferencing reflects the moved crop. A crop larger than the raw TIFF is reported as a processing error rather than resized.
 
 If both Planet and GEE after-images are missing, the exporter reports and skips that landslide without stopping the notebook. Missing-source skips are counted separately from existing cropped TIFFs.

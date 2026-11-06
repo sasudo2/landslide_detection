@@ -23,6 +23,34 @@ NOTEBOOK = (
 
 
 class LandslideDownloadTests(unittest.TestCase):
+    def test_png_respects_rgb_and_bgr_color_metadata(self):
+        notebook = json.loads(NOTEBOOK.read_text())
+        source = "".join(next(cell for cell in notebook["cells"] if cell["id"] == "3adc4a8c")["source"])
+        namespace = dict(
+            Path=Path, rasterio=rasterio, np=np,
+            STRETCH_LO_PCT=2, STRETCH_HI_PCT=98, PNG_BRIGHTNESS_GAMMA=1,
+        )
+        exec(compile(source, str(NOTEBOOK), "exec"), namespace)
+        for order in ("rgb", "bgr", "undefined"):
+            with self.subTest(order=order), tempfile.TemporaryDirectory() as directory:
+                tif = Path(directory) / "source.tif"
+                png = Path(directory) / "output.png"
+                values = [30, 20, 10] if order == "bgr" else [10, 20, 30]
+                with rasterio.open(
+                    tif, "w", driver="GTiff", width=2, height=2, count=3,
+                    dtype="uint8", transform=from_origin(0, 2, 1, 1),
+                ) as dst:
+                    dst.write(np.array([np.full((2, 2), value) for value in values], dtype=np.uint8))
+                    color = rasterio.enums.ColorInterp
+                    dst.colorinterp = (
+                        (color.blue, color.green, color.red) if order == "bgr"
+                        else (color.red, color.green, color.blue) if order == "rgb"
+                        else (color.undefined,) * 3
+                    )
+                namespace["write_rgb_png"](tif, png)
+                with rasterio.open(png) as src:
+                    self.assertEqual(src.read()[:, 0, 0].tolist(), [10, 20, 30])
+
     def test_crop_shifts_inside_edges_without_changing_dimensions(self):
         notebook = json.loads(NOTEBOOK.read_text())
         source = "".join(next(cell for cell in notebook["cells"] if cell["id"] == "82c8bea8")["source"])
