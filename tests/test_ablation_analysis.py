@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "analyze_ablation.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "analysis" / "analyze_ablation.py"
 SPEC = importlib.util.spec_from_file_location("analyze_ablation", SCRIPT)
 analysis = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = analysis

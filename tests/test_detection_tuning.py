@@ -8,8 +8,8 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NOTEBOOK = ROOT / "detection_tuning.ipynb"
-BASELINE = ROOT / "ablation_baseline.ipynb"
+NOTEBOOK = ROOT / "notebooks" / "analysis" / "detection_tuning.ipynb"
+BASELINE = ROOT / "notebooks" / "experiments" / "ablation" / "ablation_baseline.ipynb"
 
 
 def code_cells(path):

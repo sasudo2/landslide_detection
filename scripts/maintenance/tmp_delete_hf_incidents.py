@@ -11,11 +11,12 @@ Auth: set HF_TOKEN or run `huggingface-cli login`.
 import argparse
 import os
 import re
+from pathlib import Path
 
 import pandas as pd
 from huggingface_hub import CommitOperationDelete, HfApi
 
-CSV = 'landslides_from_2018_to_2026.csv'
+CSV = Path(__file__).resolve().parents[2] / 'data/reference/landslides_from_2018_to_2026.csv'
 START_IDX, END_IDX = 800, 1450  # same iloc[START:END] semantics as the notebook (end exclusive)
 REPO_ID, REPO_TYPE, REVISION = 'sasudo2/landslides', 'dataset', 'main'
 OPTICAL_SUFFIXES = ('_after.tif', '_planet_before.tif', '_gee_before.tif')

@@ -8,7 +8,12 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "download_ablation_candidates.sh"
+SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "ablation"
+    / "download_ablation_candidates.sh"
+)
 SOURCE = SCRIPT.read_text().split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
 

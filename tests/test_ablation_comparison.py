@@ -11,7 +11,13 @@ from unittest.mock import Mock
 from test_ablation_resume import sources
 
 
-NOTEBOOK = Path(__file__).resolve().parents[1] / "ablation_compare.ipynb"
+NOTEBOOK = (
+    Path(__file__).resolve().parents[1]
+    / "notebooks"
+    / "experiments"
+    / "ablation"
+    / "ablation_compare.ipynb"
+)
 
 
 class AblationComparisonTests(unittest.TestCase):

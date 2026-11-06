@@ -14,7 +14,9 @@ import rasterio
 from rasterio.transform import from_origin
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "deduplicate_candidates.py"
+PIPELINE = Path(__file__).resolve().parents[1] / "notebooks" / "pipeline"
+STAGE_2 = PIPELINE / "stage_2_candidate_collection"
+SCRIPT = STAGE_2 / "deduplicate_candidates.py"
 SPEC = importlib.util.spec_from_file_location("candidate_dedup", SCRIPT)
 dedup = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dedup
@@ -121,7 +123,9 @@ class CandidateDedupTests(unittest.TestCase):
         self.assertTrue(first.is_dir())
 
     def test_iou_matches_annotation_notebook_without_resizing(self):
-        notebook = json.loads((SCRIPT.parent / "annotation_dedup_build.ipynb").read_text())
+        notebook = json.loads(
+            (PIPELINE / "stage_3_annotation_and_png_export" / "annotation_dedup_build.ipynb").read_text()
+        )
         source = notebook["cells"][2]["source"]
         source = "".join(source) if isinstance(source, list) else source
         functions = [

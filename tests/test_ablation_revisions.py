@@ -10,8 +10,9 @@ from unittest.mock import Mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ABLATION_DIR = ROOT / "notebooks" / "experiments" / "ablation"
 RUN_NOTEBOOKS = sorted(
-    path for path in ROOT.glob("ablation_*.ipynb")
+    path for path in ABLATION_DIR.glob("ablation_*.ipynb")
     if path.name != "ablation_compare.ipynb"
 )
 SHA = "abcdef0123456789" * 2 + "abcdef01"
@@ -144,7 +145,7 @@ class AblationRevisionTests(unittest.TestCase):
                 self.assertEqual(ast.unparse(listing.value.args[1]), "raw_sha")
 
     def test_comparison_still_checks_resolved_commit(self):
-        tree = notebook_code(ROOT / "ablation_compare.ipynb")
+        tree = notebook_code(ABLATION_DIR / "ablation_compare.ipynb")
         identity = next(
             node for node in tree.body
             if isinstance(node, ast.Assign)

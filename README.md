@@ -3,12 +3,36 @@
 This repository processes reported landslide incidents into standardized raster inputs and candidate chips for downstream review.
 
 The active processing flow is implemented in:
-1. `incident_download.ipynb` (Planet quarterly composite download + GEE support layers)
-2. `candidate_detection.ipynb` (change-based candidate extraction and candidate uploads)
+1. `notebooks/pipeline/stage_1_data_acquisition/incident_download.ipynb` (Planet quarterly composite download + GEE support layers)
+2. `notebooks/pipeline/stage_2_candidate_collection/` (candidate detection, candidate download, then spatial deduplication)
+3. `notebooks/pipeline/stage_3_annotation_and_png_export/` (annotation deduplication, then cropped-image download and PNG export)
 
-`planet_order_creation.ipynb` is not part of the current flow and can be ignored.
+`notebooks/legacy/planet_order_creation.ipynb` is not part of the current flow and can be ignored.
 
 Hugging Face dataset repo `sasudo2/landslides` is the storage backend.
+
+## Repository layout
+
+| Location | Purpose |
+|---|---|
+| `notebooks/pipeline/stage_1_data_acquisition/` | Active incident download and GEE support-layer pipeline |
+| `notebooks/pipeline/stage_2_candidate_collection/` | Candidate detection, download, and spatial deduplication |
+| `notebooks/pipeline/stage_3_annotation_and_png_export/` | Annotation deduplication and image/PNG export |
+| `notebooks/experiments/ablation/` | Ablation run notebooks and comparison |
+| `notebooks/analysis/` | Detection tuning and annotation analysis |
+| `notebooks/data_preparation/` | Annotation and input-data preparation |
+| `notebooks/legacy/` | Superseded or historical workflows |
+| `scripts/` | Analysis, download, ablation, and maintenance utilities |
+| `plugins/landslide_annotator/` | QGIS annotation plugin |
+| `data/annotations/` | Annotation inputs and labeled CSVs |
+| `data/reference/` | Incident source inventory |
+| `data/cache/` | Local elevation cache |
+| `docs/` | Pipeline specifications, runbooks, and project notes |
+| `tests/` | Automated regression tests |
+
+Generated imagery and ablation outputs (for example `incidents/` and
+`ablation_candidates/`) remain separate from the tracked source tree.
+Run repository-local notebooks that use relative data paths from the repository root.
 
 ## Current status
 
@@ -17,7 +41,7 @@ The incident download logic uses precomputed **Planet quarterly mosaic composite
 - Planet's own compositing already removes cloud/shadow and normalizes color across scenes,
 - no per-scene order creation, order log, per-incident quality-report, or run manifest is used anymore.
 
-## Notebook 1: incident_download.ipynb
+## Stage 1: `notebooks/pipeline/stage_1_data_acquisition/incident_download.ipynb`
 
 Purpose:
 - For each incident AOI, produce before and after optical rasters plus support layers.
@@ -72,7 +96,12 @@ Per incident:
 Run-level artifacts:
 - `download_log.csv`
 
-## Notebook 2: candidate_detection.ipynb
+## Stage 2: Candidate collection
+
+Run the assets in this order:
+1. `notebooks/pipeline/stage_2_candidate_collection/candidate_detection.ipynb` detects candidate chips and uploads them to Hugging Face.
+2. `notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh` downloads candidate chips locally for review/annotation.
+3. `notebooks/pipeline/stage_2_candidate_collection/deduplicate_candidates.py` removes spatially repeated candidate folders after previewing the report.
 
 Purpose:
 - Build ranked candidate chips per incident from multi-source raster evidence.
@@ -83,11 +112,19 @@ Current behavior highlights:
 - Uploads candidate artifacts to Hugging Face in batched commit operations.
 - Uploads `candidate_status.csv` and `candidate_metadata.csv` together in one commit.
 
+## Stage 3: Annotation and PNG export
+
+Run the assets in this order:
+1. `notebooks/pipeline/stage_3_annotation_and_png_export/annotation_dedup_build.ipynb` resizes and deduplicates annotated rows, appending new records to the landslide/non-landslide CSVs.
+2. `notebooks/pipeline/stage_3_annotation_and_png_export/landslide_download.ipynb` reads `landslide.csv`, skips candidates whose cropped TIFF already exists under Hugging Face `landslide/`, then crops each remaining raw Planet after-image. It uploads individual TIFFs to `landslide/` and one `landslide_png/landslide_png_yyyymmdd_hhmmss.zip` containing that run's PNGs.
+
+Attach `landslide.csv` as a Kaggle dataset and update `LANDSLIDE_CSV` in the notebook to its mounted path. TIFFs and the ZIP are uploaded in one Hugging Face commit; existing TIFFs are checked before any raw-image downloads. The notebook reads the `huggingface_token` Kaggle secret and does not need a Planet API key.
+
 ## Related documentation
 
-- `REFINED_PIPELINE_SPEC.md`: authoritative requirements/spec checklist.
-- `MOSAIC_SOURCE_QUALITY_RUNBOOK.md`: operational runbook for quarterly composite selection.
-- `landslide_workflow.md`: legacy scientific workflow notes and broader methodology context.
+- `docs/pipeline/REFINED_PIPELINE_SPEC.md`: authoritative requirements/spec checklist.
+- `docs/pipeline/MOSAIC_SOURCE_QUALITY_RUNBOOK.md`: operational runbook for quarterly composite selection.
+- `notebooks/legacy/`: historical workflows and broader methodology context.
 
 ## Candidate-detection ablation study
 
@@ -95,13 +132,13 @@ The study runs as seven self-contained Kaggle notebooks: six independent run not
 
 | Notebook | Role |
 |---|---|
-| `ablation_baseline.ipynb` | Optical + SAR, slope mask/feature, SLIC, Bonferroni |
-| `ablation_optical_only.ipynb` | Optical only |
-| `ablation_sar_only.ipynb` | SAR only |
-| `ablation_no_slope.ipynb` | No slope mask and no slope segmentation feature |
-| `ablation_no_slic.ipynb` | No SLIC; pixelwise evidence and significance gate |
-| `ablation_no_bonferroni.ipynb` | Uncorrected `alpha=0.05`; same normal-approximation gate |
-| `ablation_compare.ipynb` | Optional read-only validation, then writes `comparison.csv` |
+| `notebooks/experiments/ablation/ablation_baseline.ipynb` | Optical + SAR, slope mask/feature, SLIC, Bonferroni |
+| `notebooks/experiments/ablation/ablation_optical_only.ipynb` | Optical only |
+| `notebooks/experiments/ablation/ablation_sar_only.ipynb` | SAR only |
+| `notebooks/experiments/ablation/ablation_no_slope.ipynb` | No slope mask and no slope segmentation feature |
+| `notebooks/experiments/ablation/ablation_no_slic.ipynb` | No SLIC; pixelwise evidence and significance gate |
+| `notebooks/experiments/ablation/ablation_no_bonferroni.ipynb` | Uncorrected `alpha=0.05`; same normal-approximation gate |
+| `notebooks/experiments/ablation/ablation_compare.ipynb` | Optional read-only validation, then writes `comparison.csv` |
 
 Each run notebook is independently controlled. Open the notebook, edit its configuration cell, and run it. The six run notebooks do not read each other's manifests or require the others to exist. For a comparable ablation, use the same `RAW_COMMIT_SHA` and `STUDY_ROOT` in all six; for unrelated runs, use different study roots.
 
@@ -219,14 +256,14 @@ counts.
 
 ### Download one ablation variant locally
 
-Use `download_ablation_candidates.sh` independently of the production downloader:
+Use `scripts/ablation/download_ablation_candidates.sh` independently of the production downloader:
 
 ```bash
 # Requires Python 3 and huggingface_hub; use HF_TOKEN or an existing HF login.
-./download_ablation_candidates.sh optical_only
-./download_ablation_candidates.sh no_slic 1 10 --outdir ./review/no_slic
-./download_ablation_candidates.sh baseline --study-root ablations/study_02 --revision main
-./download_ablation_candidates.sh --help
+./scripts/ablation/download_ablation_candidates.sh optical_only
+./scripts/ablation/download_ablation_candidates.sh no_slic 1 10 --outdir ./review/no_slic
+./scripts/ablation/download_ablation_candidates.sh baseline --study-root ablations/study_02 --revision main
+./scripts/ablation/download_ablation_candidates.sh --help
 ```
 
 The required variant is one of `baseline`, `optical_only`, `sar_only`, `no_slope`, `no_slic`,
@@ -251,15 +288,15 @@ are not downloaded.
 
 ### Remove repeating candidate folders before annotation
 
-`deduplicate_candidates.py` applies spatial overlap filtering to one local folder containing
+`notebooks/pipeline/stage_2_candidate_collection/deduplicate_candidates.py` applies spatial overlap filtering to one local folder containing
 `incident_*/candidate_*` directories. It requires `rasterio`.
 
 ```bash
 # Preview duplicates and write candidate_dedup_report.csv without deleting anything.
-python3 deduplicate_candidates.py ./review/no_slic
+python3 notebooks/pipeline/stage_2_candidate_collection/deduplicate_candidates.py ./review/no_slic
 
 # Permanently delete duplicate candidate folders.
-python3 deduplicate_candidates.py ./review/no_slic --delete
+python3 notebooks/pipeline/stage_2_candidate_collection/deduplicate_candidates.py ./review/no_slic --delete
 ```
 
 The script transforms each after raster's actual bounds to WGS84 and compares those boxes
@@ -279,12 +316,12 @@ folder or run downloads/annotation concurrently with deletion.
 
 ### Final ablation table from annotations
 
-After all six variants are downloaded, deduplicated, and labelled, `analyze_ablation.py` builds
+After all six variants are downloaded, deduplicated, and labelled, `scripts/analysis/analyze_ablation.py` builds
 the final ablation table (standard library only):
 
 ```bash
-python3 analyze_ablation.py                                   # ablation_candidates/ablations/study_01
-python3 analyze_ablation.py <study_dir> --outdir <dir> --site-iou 0.25 --bootstrap 5000
+python3 scripts/analysis/analyze_ablation.py                                   # ablation_candidates/ablations/study_01
+python3 scripts/analysis/analyze_ablation.py <study_dir> --outdir <dir> --site-iou 0.25 --bootstrap 5000
 ```
 
 Each variant folder needs `candidate_status.csv` and `landslide_identification.csv` (or
@@ -305,7 +342,7 @@ and incident-level bootstrap 95% CIs for ΔRecall and ΔF1. Outputs go to
 
 ### Tune detection variables against the pooled sites
 
-`detection_tuning.ipynb` is a self-contained Kaggle notebook that searches the full model's detection
+`notebooks/analysis/detection_tuning.ipynb` is a self-contained Kaggle notebook that searches the full model's detection
 variables for values that cut false positives while keeping or raising recall. It reuses the
 `ablations/study_01` raw commit (`8b2c2d92…`) and cohort, and embeds the 66 pooled sites from
 `ablation_sites.csv` as ground truth (each site's member detection boxes).
@@ -360,7 +397,7 @@ comparison can report their known counts.
 
 ### Optional comparison notebook
 
-Run `ablation_compare.ipynb` only if you want an aggregate. It is read-only until every validation
+Run `notebooks/experiments/ablation/ablation_compare.ipynb` only if you want an aggregate. It is read-only until every validation
 succeeds:
 
 1. All six variant folders exist under the configured `STUDY_ROOT` with the expected files.
@@ -396,7 +433,7 @@ or ground-truth correctness.
 
 - These are six one-component-at-a-time runs, not a full factorial study. Each run notebook is
   independent; the optional comparison only aggregates their completed outputs.
-- Baseline carries the `candidate_detection.ipynb` behavior: RGB-first optical IR-MAD, SAR VV/VH
+- Baseline carries the `notebooks/pipeline/stage_2_candidate_collection/candidate_detection.ipynb` behavior: RGB-first optical IR-MAD, SAR VV/VH
   IR-MAD, geometric-mean fusion, a 10 m EPSG:4326 grid, valid-pixel masking, slope masking, SLIC
   segments, segment-level chi-square evidence with a normal-approximation gate, Bonferroni
   correction, percentile hysteresis, morphology, area/elongation filtering, ranking, and chip

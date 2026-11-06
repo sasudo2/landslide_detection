@@ -10,7 +10,7 @@ set -euo pipefail
 #   candidates/incident_{ID}/candidate_{N}/incident_{ID}_candidate_{N}_{before,after,slope,mask}.tif
 #
 # Downloaded locally (candidates/ prefix stripped, matching the folder-pair layout
-# landslide_annotator expects):
+# expected by plugins/landslide_annotator):
 #   $OUTDIR/incident_{ID}/candidate_{N}/incident_{ID}_candidate_{N}_{before,after,slope,mask}.tif
 #   $OUTDIR/candidate_status.csv
 #   $OUTDIR/candidate_metadata.csv
@@ -27,11 +27,11 @@ set -euo pipefail
 # Index range (1-based, inclusive):
 #   200 300       -> download the 200th to 300th incidents in sorted order
 # Usage:
-#   ./download_incidents.sh                     # ALL incidents with candidates -> ./incidents
-#   ./download_incidents.sh 200                 # 200th incident -> ./incidents
-#   ./download_incidents.sh 200 300             # 200th to 300th -> ./incidents
-#   ./download_incidents.sh 200 300 ./data      # 200th to 300th -> ./data
-#   ./download_incidents.sh ./data              # all -> ./data
+#   ./notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh                     # ALL incidents -> ./incidents
+#   ./notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh 200                 # 200th incident -> ./incidents
+#   ./notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh 200 300             # 200th to 300th -> ./incidents
+#   ./notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh 200 300 ./data      # 200th to 300th -> ./data
+#   ./notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh ./data              # all -> ./data
 
 TOKEN="${HF_TOKEN:-}"
 REPO="sasudo2/landslides"

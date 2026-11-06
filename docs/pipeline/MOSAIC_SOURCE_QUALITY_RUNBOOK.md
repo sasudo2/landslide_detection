@@ -1,6 +1,6 @@
 # Planet Quarterly Composite Selection Runbook
 
-This runbook documents the current Planet path in `incident_download.ipynb`: pulling before/after optical imagery from **precomputed quarterly Planet mosaic composites** via the Mosaics/quads API.
+This runbook documents the current Planet path in `notebooks/pipeline/stage_1_data_acquisition/incident_download.ipynb`: pulling before/after optical imagery from **precomputed quarterly Planet mosaic composites** via the Mosaics/quads API.
 
 ## Scope
 

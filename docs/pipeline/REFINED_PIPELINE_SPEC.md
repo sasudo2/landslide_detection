@@ -4,10 +4,11 @@ This document is the authoritative spec for the current notebook pipeline in thi
 
 ## Pipeline notebooks
 
-1. `incident_download.ipynb`
-2. `candidate_detection.ipynb`
+1. `notebooks/pipeline/stage_1_data_acquisition/incident_download.ipynb`
+2. `notebooks/pipeline/stage_2_candidate_collection/` (candidate detection, candidate download, candidate deduplication)
+3. `notebooks/pipeline/stage_3_annotation_and_png_export/` (annotation deduplication, cropped-image download, PNG export)
 
-`planet_order_creation.ipynb` is not part of the current pipeline and can be ignored.
+`notebooks/legacy/planet_order_creation.ipynb` is not part of the current pipeline and can be ignored.
 
 ## Global rules
 
@@ -20,7 +21,7 @@ This document is the authoritative spec for the current notebook pipeline in thi
 5. Optical before/after imagery is sourced from **precomputed quarterly Planet mosaic composites** via the Mosaics/quads API. No per-scene order creation, order log, or order polling is used.
 6. All incident uploads go to Hugging Face under `raw_images/raw_incidents/incident_{ID}/` (rerun-safe via pre-upload existence checks).
 
-## Notebook 1: incident_download.ipynb
+## Stage 1: `notebooks/pipeline/stage_1_data_acquisition/incident_download.ipynb`
 
 ### Required behavior
 
@@ -50,7 +51,12 @@ This document is the authoritative spec for the current notebook pipeline in thi
 3. Per-asset/per-incident failures are isolated and do not crash the whole batch.
 4. Upload batches carefully (Hugging Face `create_commit` with `CommitOperationAdd`).
 
-## Notebook 2: candidate_detection.ipynb
+## Stage 2: Candidate collection
+
+Run these in order:
+1. `notebooks/pipeline/stage_2_candidate_collection/candidate_detection.ipynb`
+2. `notebooks/pipeline/stage_2_candidate_collection/download_candidates.sh`
+3. `notebooks/pipeline/stage_2_candidate_collection/deduplicate_candidates.py`
 
 ### Required behavior
 
@@ -66,6 +72,14 @@ This document is the authoritative spec for the current notebook pipeline in thi
 6. Export per-candidate chips: `before`, `after` (at native source resolution), `slope`, `mask` (on the analysis grid).
 7. Upload candidate artifacts to Hugging Face using batched commit operations.
 8. Upload `candidate_status.csv` and `candidate_metadata.csv` together in one commit.
+
+## Stage 3: Annotation and PNG export
+
+Run these in order:
+1. `notebooks/pipeline/stage_3_annotation_and_png_export/annotation_dedup_build.ipynb` to resize/deduplicate annotation rows and append new rows to the labeled CSVs.
+2. `notebooks/pipeline/stage_3_annotation_and_png_export/landslide_download.ipynb` to read `landslide.csv`, check for existing `landslide/incident_{incident}_candidate_{candidate}_after.tif` crops, and skip those rows before downloading any source imagery. For each new row, fetch the raw `incident_{ID}_after.tif` from `raw_images/raw_incidents/`, crop it to the annotation bbox, and produce an individual cropped TIFF plus a PNG.
+
+Upload each cropped TIFF individually under `landslide/incident_{incident}_candidate_{candidate}_after.tif`. Accumulate all PNGs generated in the current run into one `landslide_png/landslide_png_yyyymmdd_hhmmss.zip`. Commit the TIFF files and the session ZIP together. The notebook consumes only `landslide.csv` from the configured annotation path and requires the Hugging Face write token; it does not submit Planet orders or read an order log.
 
 ## Naming specification
 
