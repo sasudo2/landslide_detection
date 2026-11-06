@@ -75,6 +75,8 @@ Run these in order:
 
 ## Stage 3: Annotation and PNG export
 
+Shift out-of-bounds crop windows inside the raw TIFF, aligning overflowing edges with source edges while preserving crop width and height. Log each shift and georeference the TIFF using the shifted window. Report oversized windows that cannot fit without resizing as processing errors.
+
 If neither after-image exists for a landslide, log its incident/candidate IDs and skip it without failing the notebook. Report missing-source skips separately from existing-output skips.
 
 Run these in order:

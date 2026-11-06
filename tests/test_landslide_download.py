@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import math
 import re
 import tempfile
 import unittest
@@ -9,6 +10,10 @@ from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
+import rasterio
+from rasterio.transform import from_origin
+from rasterio.warp import transform_bounds
+from rasterio.windows import Window, from_bounds
 
 
 NOTEBOOK = (
@@ -18,6 +23,49 @@ NOTEBOOK = (
 
 
 class LandslideDownloadTests(unittest.TestCase):
+    def test_crop_shifts_inside_edges_without_changing_dimensions(self):
+        notebook = json.loads(NOTEBOOK.read_text())
+        source = "".join(next(cell for cell in notebook["cells"] if cell["id"] == "82c8bea8")["source"])
+        namespace = dict(
+            math=math, Path=Path, rasterio=rasterio,
+            transform_bounds=transform_bounds, from_bounds=from_bounds, Window=Window,
+        )
+        exec(compile(source, str(NOTEBOOK), "exec"), namespace)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "raw.tif"
+            transform = from_origin(0, 10, 1, 1)
+            pixels = np.arange(100, dtype=np.uint16).reshape(1, 10, 10)
+            with rasterio.open(
+                raw, "w", driver="GTiff", width=10, height=10, count=1,
+                dtype="uint16", crs="EPSG:4326", transform=transform,
+            ) as dst:
+                dst.write(pixels)
+            cases = [
+                (-2, 2, 0, 2), (8, 2, 6, 2),
+                (2, -2, 2, 0), (2, 8, 2, 6),
+                (-2, -2, 0, 0), (8, 8, 6, 6), (2, 2, 2, 2),
+            ]
+            for col, row, expected_col, expected_row in cases:
+                with self.subTest(col=col, row=row):
+                    annotation = dict(
+                        incident="1", candidate="1", min_lon=col, max_lon=col + 4,
+                        max_lat=10 - row, min_lat=10 - row - 4,
+                    )
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        cropped = namespace["crop_raw_after_to_tif"](raw, root / "crop.tif", annotation)
+                    with rasterio.open(cropped) as src:
+                        self.assertEqual((src.width, src.height), (4, 4))
+                        self.assertEqual(src.transform, from_origin(expected_col, 10 - expected_row, 1, 1))
+                        np.testing.assert_array_equal(
+                            src.read(), pixels[:, expected_row:expected_row + 4, expected_col:expected_col + 4],
+                        )
+                    self.assertEqual("SHIFT" in output.getvalue(), (col, row) != (expected_col, expected_row))
+            oversized = dict(incident="1", candidate="1", min_lon=0, max_lon=11, min_lat=0, max_lat=10)
+            with self.assertRaisesRegex(ValueError, "larger than its raw after-image"):
+                namespace["crop_raw_after_to_tif"](raw, root / "oversized.tif", oversized)
+
     def test_missing_sources_are_skipped_without_blocking_available_images(self):
         notebook = json.loads(NOTEBOOK.read_text())
         source = "".join(next(cell for cell in notebook["cells"] if cell["id"] == "3fe29f5a")["source"])
