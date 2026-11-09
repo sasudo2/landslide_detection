@@ -20,7 +20,7 @@ Hugging Face dataset repo `sasudo2/landslides` is the storage backend.
 | `notebooks/pipeline/stage_3_annotation_and_png_export/` | Annotation deduplication and image/PNG export |
 | `notebooks/experiments/ablation/` | Ablation run notebooks and comparison |
 | `notebooks/analysis/` | Detection tuning and annotation analysis |
-| `notebooks/data_preparation/` | Annotation and input-data preparation |
+| `notebooks/data_preparation/` | Hugging Face raster export to model-ready NumPy arrays |
 | `notebooks/legacy/` | Superseded or historical workflows |
 | `scripts/` | Analysis, download, ablation, and maintenance utilities |
 | `plugins/landslide_annotator/` | QGIS annotation plugin |
@@ -95,6 +95,101 @@ Per incident:
 
 Run-level artifacts:
 - `download_log.csv`
+
+### Standalone Kaggle multi-source candidate exporter
+
+[`multisource_candidate_dataset.ipynb`](notebooks/pipeline/stage_1_data_acquisition/multisource_candidate_dataset.ipynb)
+is a separate, CPU-only workflow for candidate CSVs, not a replacement for the
+existing incident downloader. It supports the columns in
+[`non_landslide.csv`](data/annotations/non_landslide.csv).
+
+1. Attach the CSV as a Kaggle input, enable Internet, and enable the
+   `GEE_JSON_KEY` (service-account JSON contents), `PLANET_API_KEY`, and `HF_TOKEN`
+   secrets. Set `INPUT_CSV` in the CONFIG cell.
+2. Start with `DRY_RUN=True`. **Global Quarterly** is selected by exact series
+   name, with the mosaic template `global_quarterly_{year}q{quarter}_mosaic`.
+   Clear an old analytic monthly `PLANET_SERIES_ID`, or explicitly select the
+   Global Quarterly series ID. Visual RGB/RGBA is accepted for Planet dataset
+   imagery, but is **never used for NDVI**. TIFF band labels take precedence;
+   unlabeled byte Global Quarterly RGB/RGBA uses the documented visual-product
+   band order and logs it. Alpha is not NIR. Non-byte products with missing
+   RGB labels require a verified band override with documentation source.
+3. Each candidate gets a 1,000 m local-UTM square and six aligned GeoTIFFs:
+   Planet seasonal before/after (all bands), slope, aspect, and Sentinel-1 before/after
+   (VV,VH in dB). The default 333 × 333 grid has an actual pixel size of
+   1,000/333 m, recorded in metadata. Terrain is computed at the DEM's native
+   working scale before output resampling. Sentinel-1 GRD is already in dB.
+   Planet inputs retain all delivered Global Quarterly bands/sample values
+   in float32 storage after reprojection to the common grid. Exact calendar
+   quarters are required; nearby quarters are not substituted.
+4. A seeded 30% candidate-pair sample is shifted to 2018. Shifted imagery
+   undergoes **separate Sentinel-2 SR NDVI-loss screening**; failed, missing,
+   or inconclusive pairs fall
+   back to original-date imagery. Replacement folders are published only when
+   all six layers validate. Original labels are never changed. NDVI screening
+   does **not** certify that an image is landslide-free.
+   Screening uses `COPERNICUS/S2_SR_HARMONIZED` B4 (red) and B8 (NIR),
+   scaled by 0.0001, with SCL classes 4/5/6/7 retained before a seasonal
+   reflectance median. Source scene IDs/counts and exact windows are recorded.
+   Screening runs on a separate default 10 m UTM grid over the same footprint:
+   loss-patch areas use 100 m2 per screening pixel, not the Planet output grid.
+   Auxiliary `s2_screen_before.tif` / `s2_screen_after.tif` (candidate-prefixed)
+   retain successfully downloaded Red/NIR screening composites in the archive;
+   they are **not** part of the six aligned model-input rasters. All valid
+   auxiliary rasters are grid/provenance-checked on resume and before packaging.
+   SCL is 20 m and imperfect; SR coverage in 2017–2018 is not global.
+   Missing/invalid S2 data is inconclusive, never a pass or silent TOA substitute.
+   Original-date fallback can still publish the six inputs when its S2
+   screening is unavailable: inspect `original_ndvi`, `screening_layers`, and
+   `screening_errors` rather than treating `status=complete` as an NDVI pass.
+5. The dry-run selects three candidates, including a shifted candidate, and
+   requires all three plus a verified test ZIP to succeed. It authenticates
+   and downloads but performs no Hugging Face writes. Production archives
+   contain only complete candidates, with matching metadata/status snapshots.
+   Global CSVs retain incomplete candidates and per-layer errors. Batches are
+   uploaded under a run-specific prefix; local complete data is removed only
+   after the committed remote archive's size is verified.
+
+Candidate processing is multithreaded with `MAX_WORKERS=4` by default
+(`1` restores sequential processing). Each worker uses a separate Planet HTTP
+session and isolated candidate directories; layers and fallback within a
+candidate remain sequential. Only the coordinator writes checkpoint/CSV files,
+creates archives, or uploads to Hugging Face. ZIP/upload steps wait until the
+current worker wave has finished. The queue is bounded to a single wave and
+concurrency is reduced by remaining batch slots and free disk space, with
+`DOWNLOAD_WORKSPACE_GB` estimated per worker and headroom for pending ZIPs.
+Allow enough workspace for full quads; lower workers if Kaggle/network/API
+limits become a bottleneck. `MAX_WORKERS` alone can change on resume without a
+new output directory; data-affecting configuration changes still require one.
+
+The supplied CSV currently contains 162 rows without incident dates; those
+rows are reported in `invalid_rows.csv` and skipped, not assigned invented
+dates. To calibrate NDVI sensitivity, attach a separately labeled positive CSV
+through `CALIBRATION_LANDSLIDE_CSV`; the negative-only input cannot provide
+known-landslide sensitivity. Calibration deliberately stops for review before
+production. Use a new `OUTPUT_DIR` after changing inputs or configuration
+(including upgrading from analytic monthly inputs; the new default is
+`/kaggle/working/multisource_candidates_quarterly_s2`), and
+save Kaggle outputs to retain local resume state between sessions.
+
+Confirm Planet terms permit storage on Hugging Face, including private
+repositories, before running production uploads. The notebook cannot verify
+your imagery redistribution rights or Global Quarterly download entitlement offline.
+
+### Hugging Face raster ZIP to NumPy exporter
+
+[`hf_numpy_dataset_export.ipynb`](notebooks/data_preparation/hf_numpy_dataset_export.ipynb)
+converts `landslide_early`, `landslide_latest`, and `non_landslide` ZIP folders into
+three-branch Planet/Sentinel-1/terrain arrays, incident-grouped splits, manifests,
+train-only statistics, and independent test arrays for each source folder. It
+streams one archive at a time, checkpoints completed samples, and uploads verified
+outputs to a private Hugging Face dataset repository.
+
+Fill in the source and destination repositories in its CONFIG cell, add a Kaggle
+secret named `HF_TOKEN`, and run a small `DEBUG_MAX_SAMPLES` smoke test before the
+full conversion. Use a fresh `WORK_DIR` when switching from the debug dataset to
+the full dataset. Review the notebook's inspection output and confirm the
+Sentinel-1 encoding before accepting automatic dB conversion.
 
 ## Stage 2: Candidate collection
 
